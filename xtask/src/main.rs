@@ -12,6 +12,8 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod footprint;
+
 const USAGE: &str = "\
 usage: cargo xtask <task>
 
@@ -19,7 +21,11 @@ tasks:
   build   build the boot image into target/esp
   run     build, then boot it in QEMU with a window and serial output
   test    build, boot it in QEMU without a window, and check what it printed
-  check   everything the pull request check runs: format, lint, boot test";
+  snapshot [--update]
+          build, then print the footprint report; --update also stores it
+          in snapshots/footprint.txt
+  check   everything the pull request check runs: format, lint, unit tests,
+          footprint snapshot, boot test";
 
 /// The Rust target for programs the UEFI firmware can load.
 const UEFI_TARGET: &str = "x86_64-unknown-uefi";
@@ -35,12 +41,15 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 type Result<T> = std::result::Result<T, String>;
 
 fn main() -> ExitCode {
-    let task = env::args().nth(1);
-    let result = match task.as_deref() {
-        Some("build") => build(false),
-        Some("run") => run(),
-        Some("test") => test(),
-        Some("check") => check(),
+    let args: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = match args[..] {
+        ["build"] => build(false),
+        ["run"] => run(),
+        ["test"] => test(),
+        ["snapshot"] => snapshot(false),
+        ["snapshot", "--update"] => snapshot(true),
+        ["check"] => check(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -101,12 +110,78 @@ fn build(exit_when_done: bool) -> Result<()> {
         .join(UEFI_TARGET)
         .join("debug")
         .join(format!("{BOOT_PACKAGE}.efi"));
-    let boot_dir = root.join("target").join("esp").join("EFI").join("BOOT");
-    fs::create_dir_all(&boot_dir)
+    let image = boot_image();
+    let boot_dir = image.parent().expect("the boot image path has a folder");
+    fs::create_dir_all(boot_dir)
         .map_err(|error| format!("could not create {}: {error}", boot_dir.display()))?;
-    fs::copy(&built, boot_dir.join("BOOTX64.EFI"))
+    fs::copy(&built, &image)
         .map_err(|error| format!("could not copy {}: {error}", built.display()))?;
     Ok(())
+}
+
+/// Where [`build`] puts the boot image.
+fn boot_image() -> PathBuf {
+    root()
+        .join("target")
+        .join("esp")
+        .join("EFI")
+        .join("BOOT")
+        .join("BOOTX64.EFI")
+}
+
+/// Builds the boot image as `cargo xtask build` does and measures the
+/// footprint report.
+///
+/// It builds again rather than reusing `target/esp`, because the boot test
+/// leaves a `qemu-exit` build there.
+fn footprint_report() -> Result<String> {
+    build(false)?;
+    Ok(footprint::report(&footprint::measure(
+        &root(),
+        &boot_image(),
+    )?))
+}
+
+/// Prints the footprint report, and with `update` stores it as the expected
+/// one.
+fn snapshot(update: bool) -> Result<()> {
+    let report = footprint_report()?;
+    print!("{report}");
+    if update {
+        let path = root().join(footprint::STORED);
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)
+                .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
+        }
+        fs::write(&path, &report)
+            .map_err(|error| format!("could not write {}: {error}", footprint::STORED))?;
+        println!("stored in {}", footprint::STORED);
+    }
+    Ok(())
+}
+
+/// Fails, showing the difference, if the footprint report does not match the
+/// stored one.
+fn check_snapshot() -> Result<()> {
+    let report = footprint_report()?;
+    let stored = fs::read_to_string(root().join(footprint::STORED)).map_err(|error| {
+        format!(
+            "could not read {}: {error}. Run `cargo xtask snapshot --update` to create it",
+            footprint::STORED
+        )
+    })?;
+    match footprint::difference(&stored, &report) {
+        None => {
+            println!("footprint snapshot matches {}", footprint::STORED);
+            Ok(())
+        }
+        Some(difference) => Err(format!(
+            "the footprint differs from {stored_path} (- stored, + now):\n{difference}\
+             If the change is intended, run `cargo xtask snapshot --update`, commit \
+             {stored_path} and explain each changed line in the pull request",
+            stored_path = footprint::STORED
+        )),
+    }
 }
 
 /// Boots the image in QEMU with a window, serial output in this terminal.
@@ -202,6 +277,7 @@ fn check() -> Result<()> {
             "cargo clippy (boot)",
         )?;
     }
+    check_snapshot()?;
     test()
 }
 
