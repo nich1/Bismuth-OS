@@ -183,7 +183,12 @@ fn test() -> Result<()> {
 
 /// Runs every check the pull request pipeline runs.
 fn check() -> Result<()> {
+    check_map()?;
     run_checked(cargo().args(["fmt", "--all", "--check"]), "cargo fmt")?;
+    run_checked(
+        cargo().args(["test", "--package", "xtask"]),
+        "cargo test (xtask)",
+    )?;
     run_checked(
         cargo().args(["clippy", "--package", "xtask", "--", "-D", "warnings"]),
         "cargo clippy (xtask)",
@@ -326,4 +331,91 @@ fn find_firmware() -> Result<Firmware> {
          BISMUTH_OVMF_CODE to the firmware file"
             .into(),
     )
+}
+
+/// The feature map: what exists, where it lives and how to exercise it.
+const MAP_FILE: &str = "docs/map.md";
+
+/// Fails if the feature map names a file or folder that does not exist.
+///
+/// A map that points at things that have moved misleads whoever reads it, so
+/// this keeps it from going stale without anyone noticing.
+fn check_map() -> Result<()> {
+    let root = root();
+    let text = fs::read_to_string(root.join(MAP_FILE))
+        .map_err(|error| format!("could not read {MAP_FILE}: {error}"))?;
+    let missing: Vec<&str> = paths_in_markdown(&text)
+        .into_iter()
+        .filter(|path| !root.join(path).exists())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{MAP_FILE} names paths that do not exist: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+/// Returns the repository paths a Markdown document names in `code spans`.
+///
+/// A code span counts as a path when it has no spaces and contains a `/`.
+/// Commands such as `cargo xtask test` and plain names such as `efi_main` are
+/// therefore ignored. Fenced code blocks are skipped.
+fn paths_in_markdown(text: &str) -> Vec<&str> {
+    let mut paths = Vec::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        // Splitting on backticks puts the code spans at the odd positions.
+        for span in line.split('`').skip(1).step_by(2) {
+            if span.contains('/') && !span.contains(char::is_whitespace) {
+                paths.push(span.trim_end_matches('/'));
+            }
+        }
+    }
+    paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paths_in_markdown;
+
+    #[test]
+    fn finds_paths_in_code_spans() {
+        let text = "The stage is `boot/src/main.rs` and the hook is `.githooks/commit-msg`.";
+        assert_eq!(
+            paths_in_markdown(text),
+            ["boot/src/main.rs", ".githooks/commit-msg"]
+        );
+    }
+
+    #[test]
+    fn ignores_commands_and_plain_names() {
+        let text = "Run `cargo xtask test`. The entry point is `efi_main`.";
+        assert!(paths_in_markdown(text).is_empty());
+    }
+
+    #[test]
+    fn ignores_fenced_code_blocks() {
+        let text = "```sh\ncat `not/a/path`\n```\nBut `docs/boot.md` counts.";
+        assert_eq!(paths_in_markdown(text), ["docs/boot.md"]);
+    }
+
+    #[test]
+    fn drops_a_trailing_slash_from_folders() {
+        assert_eq!(paths_in_markdown("See `boot/src/`."), ["boot/src"]);
+    }
+
+    #[test]
+    fn ignores_text_outside_code_spans() {
+        assert!(paths_in_markdown("A path like boot/src/main.rs in prose.").is_empty());
+    }
 }

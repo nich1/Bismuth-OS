@@ -67,6 +67,25 @@ agreement.
   for unsafe code, and machine-checked proofs for the core. (2026-11-26)
 - **Nothing merges without passing the checks.** (2026-11-26)
 
+## Process
+
+- **Rigour through testing.** A change is trusted because a machine checked
+  it, not because it was read. The layers are in [testing.md](testing.md).
+  (2026-11-27)
+- **Before-and-after snapshots for speed and security.** The system reports
+  its state, the expected report is stored, and every unexplained difference
+  fails. This covers memory, leaks, message counts, permissions and attack
+  surface. (2026-11-27)
+- **Corrections climb the trust ladder.** A mistake is prevented by code
+  first, then by a check, and by a written rule only as a last resort.
+  (2026-11-27)
+- **An independent verifier.** A change is attacked by an agent that has not
+  seen the author's reasoning before the owner sees it. (2026-11-27)
+- **Names follow Conventional Commits.** Branches, commit subjects and pull
+  request titles carry the type of change. (2026-11-27)
+- **The owner approves by merging.** Nothing reaches `main` any other way.
+  (2026-11-27)
+
 ## Boot
 
 - **Our own UEFI boot stage, with no third-party bootloader.** The firmware

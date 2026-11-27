@@ -31,7 +31,7 @@ jobs:
         run: cargo xtask check
 
   history:
-    name: Authorship and credit lines
+    name: Authorship, credit lines and names
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -49,3 +49,12 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: sh tools/check-history.sh
+      - name: Check branch, commit and title names
+        # Only pull requests are checked, so commits made before the
+        # convention existed are left alone.
+        if: github.event_name == 'pull_request'
+        env:
+          RANGE: ${{ format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: sh tools/check-names.sh
