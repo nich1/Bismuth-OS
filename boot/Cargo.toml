@@ -1,0 +1,15 @@
+[package]
+name = "bismuth-boot"
+description = "Bismuth's first boot stage: a UEFI program the firmware loads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Ask QEMU to exit once the boot message is out. Only the automated boot test
+# turns this on; it must stay off for real hardware.
+qemu-exit = []
+
+[lints]
+workspace = true

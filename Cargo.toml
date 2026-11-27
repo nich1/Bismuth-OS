@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["boot", "xtask"]
+# `boot` only builds for the UEFI target, so plain `cargo build` covers the
+# host tools. Use `cargo xtask build` for the boot image.
+default-members = ["xtask"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

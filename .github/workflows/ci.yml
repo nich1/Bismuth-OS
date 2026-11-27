@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+    # `edited` re-runs the credit check when a title or description changes.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boot:
+    name: Format, lint and boot test
+    # Editing a title or description changes no code, so skip the boot test.
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU and UEFI firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+      - name: Run all checks
+        run: cargo xtask check
+
+  history:
+    name: Authorship and credit lines
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check commits and pull request text
+        # Values reach the script through the environment, never by being
+        # pasted into the command, so text in a title or description cannot
+        # run as shell code.
+        env:
+          RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || 'HEAD' }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: sh tools/check-history.sh

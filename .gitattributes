@@ -1,0 +1,5 @@
+# Store text with LF line endings on every platform. Shell scripts break on
+# Linux if they are checked out with CRLF.
+* text=auto eol=lf
+*.sh text eol=lf
+.githooks/* text eol=lf
