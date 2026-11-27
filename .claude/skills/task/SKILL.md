@@ -32,9 +32,9 @@ one holds.
 
 6. **Commit, then verify.** Commit the work on the branch as the `open-pr`
    skill's first two steps say; pushing can wait. Hand the `verifier` agent
-   the task statement and the range `main...HEAD` only, never the working
-   tree. Only *wrong behaviour* goes back to the implementer; commit its fix
-   and verify once more. Never more than two passes.
+   the task statement, the "done when" line and the range `main...HEAD` only,
+   never the working tree. Only *wrong behaviour* goes back to the
+   implementer; commit its fix and verify once more. Never more than two passes.
    *Check:* no wrong behaviour is left, and every other finding is noted for
    the pull request's "Not verified, and remaining limitations" section.
 
