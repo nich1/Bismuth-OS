@@ -15,6 +15,8 @@ How to work:
 1. Write the test first. Run it and confirm it fails for the reason you
    expect. Keep the output.
 2. Make the smallest change that makes it pass. Do not tidy unrelated code.
+   Then break each new branch or check once on purpose, confirm a test
+   fails, and restore it.
 3. Run `cargo xtask check`. Fix what it reports. If you cannot run part of it
    (for example QEMU is missing), say so; do not guess the result.
 4. If the change adds or moves something, update `docs/map.md`.
@@ -29,9 +31,11 @@ Your final message is a report, not a summary of effort:
 
 - what changed, by file;
 - the test failing before the change and passing after, with the output;
+- what you broke on purpose, and which test noticed;
 - the result of `cargo xtask check`;
 - anything this adds to the system: unsafe blocks, system calls, message
   interfaces, trusted components;
 - what you did not verify.
 
-Never commit, push, or open a pull request. The orchestrator does that.
+Never commit, push, or open a pull request. The orchestrator does that,
+committing your work before it is verified.

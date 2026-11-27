@@ -27,11 +27,16 @@ one holds.
 
 5. **Implement.** Hand the task to the `implementer` agent with the task
    statement, the "done when" line and the files.
-   *Check:* its report shows the test failing before and passing after.
+   *Check:* its report shows the test failing before and passing after, and
+   what it broke on purpose that a test noticed.
 
-6. **Verify.** Hand the `verifier` agent the task statement and the diff
-   only. Fix what it confirms, then verify again.
-   *Check:* the verifier has no confirmed findings left.
+6. **Commit, then verify.** Commit the work on the branch as the `open-pr`
+   skill's first two steps say; pushing can wait. Hand the `verifier` agent
+   the task statement and the range `main...HEAD` only, never the working
+   tree. Only *wrong behaviour* goes back to the implementer; commit its fix
+   and verify once more. Never more than two passes.
+   *Check:* no wrong behaviour is left, and every other finding is noted for
+   the pull request's "Not verified, and remaining limitations" section.
 
 7. **Document.** If something was added or moved, hand the `explainer` agent
    the change.
@@ -51,6 +56,8 @@ one holds.
 |---|---|
 | The "done when" line cannot be met | Stop. Say why on the issue and ask the owner |
 | The verifier and implementer disagree | Reproduce it yourself. A finding you can reproduce stands |
+| Wrong behaviour is left after the second pass | Stop. Tell the owner what is wrong and how to reproduce it |
+| A finding is *untested or unguarded*, or an *observation* | List it in the pull request. Do not send the work back for it |
 | `cargo xtask check` fails for a reason unrelated to the task | File a `papercut` issue, then fix it in its own pull request |
 | The session must end mid-task | Use the `handoff` skill to leave a resume note |
 | A rule or document is wrong or unclear | Use the `papercut` skill |

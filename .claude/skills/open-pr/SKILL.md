@@ -5,13 +5,15 @@ description: Commit the intended work, push the branch and open a pull request a
 
 # Open a pull request
 
-1. **Stage only the task.** Add files by name. Read the staged diff.
+1. **Stage only the task.** Add files by name: the work, before it is
+   verified, then here anything since, such as documents. Read the staged
+   diff.
    *Check:* `git diff --cached --stat` lists nothing unrelated, no secrets and
    no build output.
 
 2. **Commit.** Subject `type: description`. Say what behaviour changed.
-   *Check:* the commit hook accepted it, and `git log -1` shows the owner as
-   author.
+   *Check:* the commit hook accepted it, and `git log main..HEAD` shows the
+   owner as author of every commit.
 
 3. **Check the whole branch, not just the last commit.**
    `git diff --stat origin/main...HEAD`.
