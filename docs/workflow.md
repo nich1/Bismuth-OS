@@ -29,9 +29,11 @@ definitions are in `.claude/agents/`.
    A decision comes with a small prototype or a measurement, not only an
    argument.
 4. **Implement.** On a branch named for the task. The failing test comes
-   first.
-5. **Verify.** `cargo xtask check` passes, then the verifier attacks the
-   change without seeing the implementer's reasoning.
+   first, and the implementer breaks its own code once to see a test notice.
+5. **Verify.** `cargo xtask check` passes and the work is committed, then the
+   verifier attacks the commits, in its own copy, without seeing the
+   implementer's reasoning. At most two passes: only wrong behaviour goes
+   back; other findings are listed in the pull request.
 6. **Pull request.** Opened as the owner, with the problem, the result, the
    evidence and what is left.
 7. **Checks.** Tests, authorship and naming all run automatically.

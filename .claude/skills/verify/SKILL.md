@@ -8,7 +8,7 @@ description: Prove a change works and collect the evidence a pull request needs.
 "It should work" is not evidence. Evidence is a command and what it printed.
 
 1. **Show the test fails without the change.** Run the new test against the
-   code as it was. Keep the failing output.
+   code as it was; for new code, break the code instead. Keep the output.
    *Check:* the failure is the one the change is meant to fix, not a
    compile error or a typo.
 

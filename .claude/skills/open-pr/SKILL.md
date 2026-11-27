@@ -1,17 +1,19 @@
 ---
 name: open-pr
-description: Commit the intended work, push the branch and open a pull request as the repository owner. Use when a change is verified and ready for review.
+description: Commit the intended work, push the branch and open a pull request as the repository owner. Use when a change is verified and ready for review; the `task` skill also uses steps 1 and 2 to commit work before verifying it.
 ---
 
 # Open a pull request
 
-1. **Stage only the task.** Add files by name. Read the staged diff.
+1. **Stage only the task.** Add files by name: anything not yet committed,
+   such as documents added after verification. Read the staged diff. If
+   nothing changed since the last commit, skip this step and the next.
    *Check:* `git diff --cached --stat` lists nothing unrelated, no secrets and
    no build output.
 
 2. **Commit.** Subject `type: description`. Say what behaviour changed.
-   *Check:* the commit hook accepted it, and `git log -1` shows the owner as
-   author.
+   *Check:* the commit hook accepted it, and `git log main..HEAD` shows the
+   owner as author of every commit.
 
 3. **Check the whole branch, not just the last commit.**
    `git diff --stat origin/main...HEAD`.
