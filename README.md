@@ -32,7 +32,7 @@ On Debian or Ubuntu, QEMU's UEFI firmware is a separate package: `sudo apt insta
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for the project's rules and pull request workflow.
+See [AGENTS.md](AGENTS.md) for the project's rules, [docs/workflow.md](docs/workflow.md) for how a change gets made, and [docs/testing.md](docs/testing.md) for how it is checked.
 
 ## Licence
 
