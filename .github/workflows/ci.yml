@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    # `edited` re-runs the credit check when a title or description changes.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [main]
 
@@ -15,6 +17,8 @@ concurrency:
 jobs:
   boot:
     name: Format, lint and boot test
+    # Editing a title or description changes no code, so skip the boot test.
+    if: github.event.action != 'edited'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
