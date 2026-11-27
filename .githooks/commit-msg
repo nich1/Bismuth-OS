@@ -1,5 +1,8 @@
 #!/bin/sh
-# Rejects a commit whose message credits an AI tool.
+# Rejects a commit whose message credits a tool or whose subject does not
+# follow the naming convention.
 # Enable once per clone with: git config core.hooksPath .githooks
 set -eu
-exec "$(git rev-parse --show-toplevel)/tools/check-attribution.sh" < "$1"
+root=$(git rev-parse --show-toplevel)
+"$root/tools/check-attribution.sh" < "$1"
+head -n 1 "$1" | "$root/tools/check-names.sh" --subject
