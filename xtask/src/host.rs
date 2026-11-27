@@ -161,9 +161,22 @@ fn pr_create_args(branch: &str, title: &str, body_file: &str, draft: bool) -> Re
     Ok(args)
 }
 
-fn pr_edit_args(body_file: &str) -> Result<Vec<String>> {
-    let body = checked_body(body_file)?;
-    Ok(strings(&["pr", "edit", "--body-file", &body]))
+/// Prints the number of the current branch's pull request.
+fn pr_number_args() -> Vec<String> {
+    strings(&["pr", "view", "--json", "number", "--jq", ".number"])
+}
+
+/// Replaces the description through the REST API. `gh pr edit` also reads
+/// organisation fields, which git's token may not be allowed to. With `-F`,
+/// a value read from `@file` is always sent as a string; gh fills in
+/// `{owner}/{repo}` from the repository it runs in. Prints only the address.
+fn pr_edit_args(number: &str, body_file: &str) -> Result<Vec<String>> {
+    let field = format!("body=@{}", checked_body(body_file)?);
+    let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{number}");
+    let method = ["api", "--method", "PATCH"];
+    let mut args = strings(&method);
+    args.extend(strings(&[&endpoint, "-F", &field, "--jq", ".html_url"]));
+    Ok(args)
 }
 
 fn pr_ready_args() -> Vec<String> {
@@ -419,8 +432,14 @@ pub fn pr_open(title: &str, body_file: &str, draft: bool) -> Result<()> {
 }
 
 pub fn pr_edit(body_file: &str) -> Result<()> {
-    let args = pr_edit_args(body_file)?;
-    Gh::new()?.run(&args)
+    checked_body(body_file)?;
+    let gh = Gh::new()?;
+    let output = gh.output(&pr_number_args())?;
+    let number = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || !crate::is_number(&number) {
+        return Err("could not find the current branch's pull request".into());
+    }
+    gh.run(&pr_edit_args(&number, body_file)?)
 }
 
 pub fn pr_ready() -> Result<()> {
@@ -639,8 +658,22 @@ mod tests {
             "--draft"
         );
         assert_eq!(
-            pr_edit_args(&body).unwrap(),
-            ["pr", "edit", "--body-file", &body]
+            pr_number_args(),
+            ["pr", "view", "--json", "number", "--jq", ".number"]
+        );
+        let field = format!("body=@{body}");
+        assert_eq!(
+            pr_edit_args("18", &body).unwrap(),
+            [
+                "api",
+                "--method",
+                "PATCH",
+                "repos/{owner}/{repo}/pulls/18",
+                "-F",
+                &field,
+                "--jq",
+                ".html_url"
+            ]
         );
         assert_eq!(pr_ready_args(), ["pr", "ready"]);
         assert_eq!(
@@ -666,7 +699,7 @@ mod tests {
         assert!(issue_new_args("chore: thanks Claude", &clean, None).is_err());
         assert!(pr_create_args("feat/x", "feat: x", &credit, false).is_err());
         assert!(pr_create_args("feat/x", "feat: thanks Claude", &clean, false).is_err());
-        assert!(pr_edit_args(&credit).is_err());
+        assert!(pr_edit_args("18", &credit).is_err());
     }
 
     #[test]
@@ -678,11 +711,14 @@ mod tests {
         assert_ne!(here, at_root);
         fs::write(&here, "checked\n").unwrap();
         fs::write(&at_root, "thanks Claude\n").unwrap();
-        let sent = pr_edit_args(&name)
-            .map(|args| fs::read_to_string(crate::root().join(&args[3])).unwrap());
+        // Nothing here may panic before both files are removed.
+        let sent = pr_edit_args("18", &name).map(|args| {
+            let path = args.iter().find_map(|arg| arg.strip_prefix("body=@"));
+            path.and_then(|path| fs::read_to_string(crate::root().join(path)).ok())
+        });
         let _ = fs::remove_file(&here);
         let _ = fs::remove_file(&at_root);
-        assert_eq!(sent, Ok("checked\n".to_string()));
+        assert_eq!(sent, Ok(Some("checked\n".to_string())));
     }
 
     #[test]
