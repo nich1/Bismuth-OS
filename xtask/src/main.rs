@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod footprint;
+mod host;
 
 const USAGE: &str = "\
 usage: cargo xtask <task>
@@ -25,7 +26,18 @@ tasks:
           build, then print the footprint report; --update also stores it
           in snapshots/footprint.txt
   check   everything the pull request check runs: format, lint, unit tests,
-          footprint snapshot, boot test";
+          footprint snapshot, boot test
+
+code host tasks (need gh, GitHub's command-line tool):
+  issue-read <number>
+  issue-comment <number> --body-file <path>
+  issue-new --title <text> --body-file <path> [--label <name>]
+  pr-open --title <text> --body-file <path> [--draft]
+          push the current branch and open a pull request against main
+  pr-edit --body-file <path>
+  pr-ready
+  pr-wait [<number>]
+          wait for every check on the pull request to finish";
 
 /// The Rust target for programs the UEFI firmware can load.
 const UEFI_TARGET: &str = "x86_64-unknown-uefi";
@@ -50,6 +62,26 @@ fn main() -> ExitCode {
         ["snapshot"] => snapshot(false),
         ["snapshot", "--update"] => snapshot(true),
         ["check"] => check(),
+        ["issue-read", n] if is_number(n) => host::issue_read(n),
+        ["issue-comment", n, "--body-file", body] if is_number(n) => host::issue_comment(n, body),
+        ["issue-new", "--title", title, "--body-file", body] => host::issue_new(title, body, None),
+        [
+            "issue-new",
+            "--title",
+            title,
+            "--body-file",
+            body,
+            "--label",
+            label,
+        ] => host::issue_new(title, body, Some(label)),
+        ["pr-open", "--title", title, "--body-file", body] => host::pr_open(title, body, false),
+        ["pr-open", "--title", title, "--body-file", body, "--draft"] => {
+            host::pr_open(title, body, true)
+        }
+        ["pr-edit", "--body-file", body] => host::pr_edit(body),
+        ["pr-ready"] => host::pr_ready(),
+        ["pr-wait"] => host::pr_wait(None),
+        ["pr-wait", n] if is_number(n) => host::pr_wait(Some(n)),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -62,6 +94,11 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// True for an issue or pull request number.
+fn is_number(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// The repository root: the parent of this package's directory.

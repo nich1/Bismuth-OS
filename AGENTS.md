@@ -18,6 +18,8 @@ Read these first, in this order:
 | `cargo xtask test` | Boots it in QEMU with no window and checks the output |
 | `cargo xtask snapshot` | Builds the boot image and prints the footprint report; `--update` also stores it in `snapshots/footprint.txt` |
 | `cargo xtask check` | Everything the pull request check runs |
+| `cargo xtask pr-open`, `pr-edit`, `pr-ready`, `pr-wait` | Push the branch and open its pull request, replace its description, mark it ready, wait for its checks |
+| `cargo xtask issue-read`, `issue-comment`, `issue-new` | Read an issue with its comments, comment on one, file one |
 
 Once per clone, turn on the commit hook:
 

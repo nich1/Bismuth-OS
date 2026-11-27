@@ -8,8 +8,8 @@ description: Take one issue from the backlog through plan, implementation, indep
 Do the steps in order. Do not start a step until the check for the previous
 one holds.
 
-1. **Pick up the task.** Read the issue. If it has a resume note or an open
-   branch, use the `handoff` skill first.
+1. **Pick up the task.** `cargo xtask issue-read <number>`. If it has a
+   resume note or an open branch, use the `handoff` skill first.
    *Check:* you can state the task and its "done when" line in one sentence
    each.
 
@@ -17,8 +17,9 @@ one holds.
    `docs/decisions.md` the task touches.
    *Check:* you know which files will change.
 
-3. **Plan on the issue.** A few lines: approach, the test that will prove it,
-   what could go wrong.
+3. **Plan on the issue.** A few lines in a file: approach, the test that
+   will prove it, what could go wrong. `cargo xtask issue-comment <number>
+   --body-file <path>`.
    *Check:* the plan needs no architecture decision. If it does, stop and
    bring the owner a short explainer with options and a recommendation.
 

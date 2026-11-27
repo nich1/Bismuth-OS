@@ -27,10 +27,10 @@ description: Prove a change works and collect the evidence a pull request needs.
    list from step 4, and a plain statement of anything not run.
    *Check:* someone who has not seen the session could repeat each command.
 
-6. **After the pull request is open, wait for its checks with one command
-   that blocks until they finish.** Do not check repeatedly by hand.
-   *Check:* you have the final result of every check, and for a failure, the
-   failing step's own output.
+6. **After the pull request is open, wait for its checks:**
+   `cargo xtask pr-wait`. Do not check repeatedly by hand.
+   *Check:* it printed every check's result, and for a failure, the end of
+   the failing step's log.
 
 ## When a step fails
 

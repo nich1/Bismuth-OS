@@ -11,7 +11,8 @@ around one quietly means the next session hits it too.
 1. **Check it is not already filed.** Search open issues labelled `papercut`.
    *Check:* no existing issue describes the same thing.
 
-2. **File an issue labelled `papercut`** with:
+2. **File it:** `cargo xtask issue-new --title <text> --body-file <path>
+   --label papercut`, the body saying:
    - what you were doing;
    - what got in the way, with the exact command and output or the exact
      sentence that was wrong;
