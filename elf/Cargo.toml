@@ -1,0 +1,10 @@
+[package]
+name = "bismuth-elf"
+description = "Reads the file header and loadable segments of an x86-64 ELF file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

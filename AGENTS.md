@@ -13,7 +13,7 @@ Read these first, in this order:
 
 | Command | What it does |
 |---|---|
-| `cargo xtask build` | Builds the boot image into `target/esp` |
+| `cargo xtask build` | Builds the boot image and the kernel into `target/esp` |
 | `cargo xtask run` | Boots it in QEMU with a window and serial output |
 | `cargo xtask test` | Boots it in QEMU with no window and checks the output |
 | `cargo xtask snapshot` | Builds the boot image and prints the footprint report; `--update` also stores it in `snapshots/footprint.txt` |
