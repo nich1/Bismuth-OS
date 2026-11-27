@@ -101,4 +101,5 @@ check enforce this.
   becomes a `cargo xtask` command, not a series of steps an agent re-derives.
 - **Little is loaded by default.** `AGENTS.md` stays short. Procedures live in
   skills, which are read only when used.
-- **Waiting is done by a script,** not by an agent checking repeatedly.
+- **Waiting is done by a script,** not by an agent checking repeatedly:
+  `cargo xtask pr-wait` blocks until a pull request's checks finish.
