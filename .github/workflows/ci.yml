@@ -2,8 +2,9 @@ name: CI
 
 on:
   pull_request:
-    # `edited` re-runs the credit check when a title or description changes.
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    # Not `edited`: a title or description change touches no code, and its
+    # checks live in text.yml so they cannot replace or cancel this run.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -17,8 +18,6 @@ concurrency:
 jobs:
   boot:
     name: Format, lint and boot test
-    # Editing a title or description changes no code, so skip the boot test.
-    if: github.event.action != 'edited'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -29,32 +28,3 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
       - name: Run all checks
         run: cargo xtask check
-
-  history:
-    name: Authorship, credit lines and names
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Check commits and pull request text
-        # Values reach the script through the environment, never by being
-        # pasted into the command, so text in a title or description cannot
-        # run as shell code.
-        env:
-          RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || 'HEAD' }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: sh tools/check-history.sh
-      - name: Check branch, commit and title names
-        # Only pull requests are checked, so commits made before the
-        # convention existed are left alone.
-        if: github.event_name == 'pull_request'
-        env:
-          RANGE: ${{ format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) }}
-          HEAD_BRANCH: ${{ github.head_ref }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: sh tools/check-names.sh

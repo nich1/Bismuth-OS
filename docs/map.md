@@ -24,10 +24,12 @@ There is no kernel yet.
 | Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per boot file and third-party packages, and compares the report with the stored one |
 | Stored footprint | `snapshots/footprint.txt` | The expected footprint report. `cargo xtask snapshot --update` rewrites it |
 | Pinned compiler | `rust-toolchain.toml` | The Rust version and the UEFI build target |
-| Pull request checks | `.github/workflows/ci.yml` | Runs the checks below on every pull request |
+| Boot checks | `.github/workflows/ci.yml` | Runs `cargo xtask check` on every pull request and on `main`, but not when only a title or description is edited |
+| Text checks | `.github/workflows/text.yml` | Runs the authorship, naming and workflow checks below on every pull request and on `main`, and again when a title or description is edited |
 | Credit check | `tools/check-attribution.sh` | Fails text that credits a tool |
 | Authorship check | `tools/check-history.sh` | Fails commits or pull requests that are not the owner's |
 | Naming check | `tools/check-names.sh` | Fails branch names, commit subjects and titles that do not follow the convention |
+| Workflow check | `tools/check-workflows.sh` | Fails a workflow that re-runs on title or description edits and also runs the boot test |
 | Commit hook | `.githooks/commit-msg` | Runs the credit and naming checks before a commit is made |
 
 ## Documents
