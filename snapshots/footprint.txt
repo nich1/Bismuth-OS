@@ -1,17 +1,23 @@
-boot image bytes: 12288
+boot image bytes: 48128
 third-party packages: 0
-unsafe blocks in boot/src/main.rs: 3
+unsafe blocks in boot/src/main.rs: 4
 unsafe blocks in boot/src/port.rs: 3
+unsafe blocks in boot/src/report.rs: 0
 unsafe blocks in boot/src/serial.rs: 3
 unsafe blocks in boot/src/uefi.rs: 2
+unsafe blocks in boot/src/uefi/boot_services.rs: 4
+unsafe blocks in boot/src/uefi/file.rs: 13
 unsafe blocks in elf/src/lib.rs: 0
 unsafe blocks in elf/src/tests.rs: 0
 unsafe blocks in kernel/src/cpu.rs: 1
 unsafe blocks in kernel/src/main.rs: 0
 unsafe fn declarations in boot/src/main.rs: 1
 unsafe fn declarations in boot/src/port.rs: 3
+unsafe fn declarations in boot/src/report.rs: 0
 unsafe fn declarations in boot/src/serial.rs: 0
 unsafe fn declarations in boot/src/uefi.rs: 1
+unsafe fn declarations in boot/src/uefi/boot_services.rs: 2
+unsafe fn declarations in boot/src/uefi/file.rs: 1
 unsafe fn declarations in elf/src/lib.rs: 0
 unsafe fn declarations in elf/src/tests.rs: 0
 unsafe fn declarations in kernel/src/cpu.rs: 0

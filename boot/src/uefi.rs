@@ -2,18 +2,37 @@
 //!
 //! UEFI is the firmware on modern PCs. It starts our program and passes a
 //! pointer to its "system table", a structure of pointers to firmware
-//! services. Only the fields up to the text console are declared here; the
-//! layouts come from the UEFI specification, section 4 (system table) and
-//! section 12.4 (simple text output).
+//! services. Only the fields the boot stage reads are declared here; the
+//! layouts come from the UEFI specification, version 2.10: section 4.3
+//! (system table) and section 12.4 (simple text output) in this file, and the
+//! sections named in the submodules for the rest.
+//!
+//! - `boot_services`: memory allocation and protocol lookup.
+//! - `file`: reading a whole file from the disk the boot stage came from.
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
+mod boot_services;
+mod file;
+
+pub use boot_services::BootServices;
+pub use file::FilePath;
+
 /// An opaque firmware object reference.
 pub type Handle = *mut c_void;
 
-/// A firmware status code. Zero means success.
+/// A firmware status code. Zero means success (section 2.3.1, `EFI_STATUS`;
+/// the values are in appendix D).
 pub type Status = usize;
+
+/// `EFI_SUCCESS`, appendix D.
+const SUCCESS: Status = 0;
+
+/// A 128-bit identifier naming a protocol (section 2.3.1, `EFI_GUID`, which
+/// is 64-bit aligned; appendix A gives the field layout).
+#[repr(C, align(8))]
+struct Guid(u32, u16, u16, [u8; 8]);
 
 /// The value the firmware puts at the start of a genuine system table: the
 /// ASCII text "IBI SYST" read as a little-endian number.
@@ -29,8 +48,8 @@ pub struct TableHeader {
     reserved: u32,
 }
 
-/// The start of the UEFI system table. Fields after the console are not
-/// declared because nothing here reads them.
+/// The start of the UEFI system table (section 4.3). Fields after the boot
+/// services table are not declared because nothing here reads them.
 #[repr(C)]
 pub struct SystemTable {
     header: TableHeader,
@@ -40,6 +59,10 @@ pub struct SystemTable {
     console_in: *mut c_void,
     console_out_handle: Handle,
     console_out: *mut SimpleTextOutput,
+    standard_error_handle: Handle,
+    standard_error: *mut c_void,
+    runtime_services: *mut c_void,
+    boot_services: *mut boot_services::Table,
 }
 
 /// The start of the firmware's text-output interface.

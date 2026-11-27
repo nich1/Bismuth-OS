@@ -18,8 +18,18 @@
     clippy::arithmetic_side_effects,
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::panic_in_result_fn,
+    clippy::unwrap_in_result,
+    clippy::string_slice,
+    clippy::fallible_impl_from
 )]
+// No lint covers `assert!` outside a function returning `Result`,
+// `split_at`, `copy_from_slice`, `chunks`, `windows` or `pow`; the reader
+// uses none of them.
 
 #[cfg(test)]
 mod tests;
