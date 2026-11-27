@@ -118,45 +118,52 @@ fn issue_read_args(number: &str) -> Vec<String> {
     args
 }
 
-fn issue_comment_args(number: &str, body_file: &str) -> Vec<String> {
-    strings(&["issue", "comment", number, "--body-file", body_file])
+// The builders for commands that send text check it first, so a test can
+// see that nothing reaches gh unchecked.
+
+fn issue_comment_args(number: &str, body_file: &str) -> Result<Vec<String>> {
+    let body = checked_body(body_file)?;
+    Ok(strings(&["issue", "comment", number, "--body-file", &body]))
 }
 
-fn issue_new_args(title: &str, body_file: &str, label: Option<&str>) -> Vec<String> {
-    let mut args = strings(&[
-        "issue",
-        "create",
-        "--title",
-        title,
-        "--body-file",
-        body_file,
-    ]);
+fn issue_new_args(title: &str, body_file: &str, label: Option<&str>) -> Result<Vec<String>> {
+    check_credit("title", title)?;
+    let body = checked_body(body_file)?;
+    let mut args = strings(&["issue", "create", "--title", title, "--body-file", &body]);
     if let Some(label) = label {
         args.extend(strings(&["--label", label]));
     }
-    args
+    Ok(args)
 }
 
 /// The `git push` arguments for `branch`. Refuses `main` and a detached head.
+/// The full refspec means a name such as `+x` cannot force a push, and a
+/// configured `remote.origin.push` cannot send the branch elsewhere.
 fn push_args(branch: &str) -> Result<Vec<String>> {
     match branch {
         "" => Err("no branch is checked out; check out the task's branch first".into()),
         "main" => Err("refusing to push main; work on a `type/short-description` branch".into()),
-        _ => Ok(strings(&["push", "-u", "origin", branch])),
+        _ => {
+            let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+            Ok(strings(&["push", "-u", "origin", &refspec]))
+        }
     }
 }
 
-fn pr_create_args(branch: &str, title: &str, body_file: &str, draft: bool) -> Vec<String> {
+fn pr_create_args(branch: &str, title: &str, body_file: &str, draft: bool) -> Result<Vec<String>> {
+    check_credit("title", title)?;
+    let body = checked_body(body_file)?;
     let mut args = strings(&["pr", "create", "--base", "main", "--head", branch]);
-    args.extend(strings(&["--title", title, "--body-file", body_file]));
+    args.extend(strings(&["--title", title, "--body-file", &body]));
     if draft {
         args.push("--draft".into());
     }
-    args
+    Ok(args)
 }
 
-fn pr_edit_args(body_file: &str) -> Vec<String> {
-    strings(&["pr", "edit", "--body-file", body_file])
+fn pr_edit_args(body_file: &str) -> Result<Vec<String>> {
+    let body = checked_body(body_file)?;
+    Ok(strings(&["pr", "edit", "--body-file", &body]))
 }
 
 fn pr_ready_args() -> Vec<String> {
@@ -358,11 +365,18 @@ impl Gh {
     }
 }
 
-/// Reads a body file and fails if it credits a tool.
-fn checked_body(path: &str) -> Result<()> {
-    let text =
-        fs::read_to_string(path).map_err(|error| format!("could not read {path}: {error}"))?;
-    check_credit("body", &text)
+/// Reads a body file and fails if it credits a tool. Returns the path to
+/// give gh: made absolute once and used for both the reading and gh, so the
+/// file checked is the file sent although gh runs from another folder.
+fn checked_body(path: &str) -> Result<String> {
+    let error = |error: std::io::Error| format!("could not read {path}: {error}");
+    let absolute = std::path::absolute(path).map_err(error)?;
+    let text = fs::read_to_string(&absolute).map_err(error)?;
+    check_credit("body", &text)?;
+    absolute
+        .into_os_string()
+        .into_string()
+        .map_err(|_| format!("{path} is not a UTF-8 path"))
 }
 
 /// The branch checked out now.
@@ -383,32 +397,30 @@ pub fn issue_read(number: &str) -> Result<()> {
 }
 
 pub fn issue_comment(number: &str, body_file: &str) -> Result<()> {
-    checked_body(body_file)?;
-    Gh::new()?.run(&issue_comment_args(number, body_file))
+    let args = issue_comment_args(number, body_file)?;
+    Gh::new()?.run(&args)
 }
 
 pub fn issue_new(title: &str, body_file: &str, label: Option<&str>) -> Result<()> {
-    check_credit("title", title)?;
-    checked_body(body_file)?;
-    Gh::new()?.run(&issue_new_args(title, body_file, label))
+    let args = issue_new_args(title, body_file, label)?;
+    Gh::new()?.run(&args)
 }
 
 pub fn pr_open(title: &str, body_file: &str, draft: bool) -> Result<()> {
-    check_credit("title", title)?;
-    checked_body(body_file)?;
     let branch = current_branch()?;
+    let create = pr_create_args(&branch, title, body_file, draft)?;
     let push = push_args(&branch)?;
     let gh = Gh::new()?;
     crate::run_checked(
         Command::new("git").current_dir(crate::root()).args(&push),
         "git push",
     )?;
-    gh.run(&pr_create_args(&branch, title, body_file, draft))
+    gh.run(&create)
 }
 
 pub fn pr_edit(body_file: &str) -> Result<()> {
-    checked_body(body_file)?;
-    Gh::new()?.run(&pr_edit_args(body_file))
+    let args = pr_edit_args(body_file)?;
+    Gh::new()?.run(&args)
 }
 
 pub fn pr_ready() -> Result<()> {
@@ -547,6 +559,14 @@ mod tests {
         assert!(error.contains("gh auth login"), "{error}");
     }
 
+    /// Writes `text` to a file of its own in the system temporary folder and
+    /// returns its absolute path.
+    fn temp_file(name: &str, text: &str) -> String {
+        let path = env::temp_dir().join(format!("bismuth-host-{}-{name}", std::process::id()));
+        fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
     #[test]
     fn issue_args() {
         assert_eq!(
@@ -561,50 +581,43 @@ mod tests {
                 ISSUE_JQ
             ]
         );
+        let body = temp_file("issue.md", "fine\n");
         assert_eq!(
-            issue_comment_args("7", "plan.md"),
-            ["issue", "comment", "7", "--body-file", "plan.md"]
+            issue_comment_args("7", &body).unwrap(),
+            ["issue", "comment", "7", "--body-file", &body]
         );
         assert_eq!(
-            issue_new_args("chore: x", "b.md", None),
+            issue_new_args("chore: x", &body, None).unwrap(),
             [
                 "issue",
                 "create",
                 "--title",
                 "chore: x",
                 "--body-file",
-                "b.md"
+                &body
             ]
         );
         assert_eq!(
-            issue_new_args("chore: x", "b.md", Some("papercut")),
-            [
-                "issue",
-                "create",
-                "--title",
-                "chore: x",
-                "--body-file",
-                "b.md",
-                "--label",
-                "papercut"
-            ]
+            issue_new_args("chore: x", &body, Some("papercut")).unwrap()[6..],
+            ["--label", "papercut"]
         );
     }
 
     #[test]
     fn push_never_targets_main_or_forces() {
-        assert_eq!(
-            push_args("feat/x").unwrap(),
-            ["push", "-u", "origin", "feat/x"]
-        );
+        let feat = "refs/heads/feat/x:refs/heads/feat/x";
+        assert_eq!(push_args("feat/x").unwrap(), ["push", "-u", "origin", feat]);
+        // A leading `+` would force the push if the name were the refspec.
+        assert_eq!(push_args("+x").unwrap()[3], "refs/heads/+x:refs/heads/+x");
         assert!(push_args("main").is_err());
         assert!(push_args("").is_err());
     }
 
     #[test]
     fn pr_args() {
+        let body = temp_file("pr.md", "fine\n");
         assert_eq!(
-            pr_create_args("feat/x", "feat: x", "b.md", false),
+            pr_create_args("feat/x", "feat: x", &body, false).unwrap(),
             [
                 "pr",
                 "create",
@@ -615,16 +628,20 @@ mod tests {
                 "--title",
                 "feat: x",
                 "--body-file",
-                "b.md"
+                &body
             ]
         );
         assert_eq!(
-            pr_create_args("feat/x", "feat: x", "b.md", true)
+            pr_create_args("feat/x", "feat: x", &body, true)
+                .unwrap()
                 .last()
                 .unwrap(),
             "--draft"
         );
-        assert_eq!(pr_edit_args("b.md"), ["pr", "edit", "--body-file", "b.md"]);
+        assert_eq!(
+            pr_edit_args(&body).unwrap(),
+            ["pr", "edit", "--body-file", &body]
+        );
         assert_eq!(pr_ready_args(), ["pr", "ready"]);
         assert_eq!(
             pr_checks_args(None),
@@ -638,6 +655,53 @@ mod tests {
             ]
         );
         assert_eq!(pr_checks_args(Some("17"))[2], "17");
+    }
+
+    #[test]
+    fn every_command_that_sends_text_checks_it_first() {
+        let clean = temp_file("clean.md", "fine\n");
+        let credit = temp_file("credit.md", "thanks Claude\n");
+        assert!(issue_comment_args("7", &credit).is_err());
+        assert!(issue_new_args("chore: x", &credit, None).is_err());
+        assert!(issue_new_args("chore: thanks Claude", &clean, None).is_err());
+        assert!(pr_create_args("feat/x", "feat: x", &credit, false).is_err());
+        assert!(pr_create_args("feat/x", "feat: thanks Claude", &clean, false).is_err());
+        assert!(pr_edit_args(&credit).is_err());
+    }
+
+    #[test]
+    fn a_relative_body_file_is_sent_as_the_file_that_was_checked() {
+        // Tests run in xtask/, while gh runs from the repository root.
+        let name = format!("host-test-body-{}.md", std::process::id());
+        let here = env::current_dir().unwrap().join(&name);
+        let at_root = crate::root().join(&name);
+        assert_ne!(here, at_root);
+        fs::write(&here, "checked\n").unwrap();
+        fs::write(&at_root, "thanks Claude\n").unwrap();
+        let sent = pr_edit_args(&name)
+            .map(|args| fs::read_to_string(crate::root().join(&args[3])).unwrap());
+        let _ = fs::remove_file(&here);
+        let _ = fs::remove_file(&at_root);
+        assert_eq!(sent, Ok("checked\n".to_string()));
+    }
+
+    #[test]
+    fn the_token_reaches_gh_only_through_its_environment() {
+        let gh = Gh {
+            program: "gh".into(),
+            credential: Credential::Token(Secret("abc123".into())),
+        };
+        let command = gh.command(&pr_ready_args());
+        assert!(
+            command
+                .get_args()
+                .all(|arg| !arg.to_string_lossy().contains("abc123"))
+        );
+        let token = command
+            .get_envs()
+            .find(|(key, _)| *key == "GH_TOKEN")
+            .and_then(|(_, value)| value);
+        assert_eq!(token, Some(std::ffi::OsStr::new("abc123")));
     }
 
     fn check(bucket: &str, name: &str) -> Check {
