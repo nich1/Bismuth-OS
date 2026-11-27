@@ -11,6 +11,7 @@ agent and the pull request checks all run exactly the same thing.
 | Compiler and lints | Type errors, undocumented unsafe code | Every build | In place |
 | Unit tests on the development machine | Logic bugs in code that needs no hardware | Every pull request | In place for `xtask`; the kernel follows |
 | Boot scenarios in QEMU | The system not working end to end | Every pull request | One scenario |
+| Before-and-after snapshots | Growth nobody explained | Every pull request | One snapshot, footprint; the rest planned |
 | Mutation testing | Tests that still pass when the code is broken | Nightly, and on changed code | Planned, once the kernel has unit tests |
 | Miri | Undefined behaviour in unsafe code | Every pull request | Planned, with the first unsafe data structure |
 | Fuzzing | Crashes on hostile input | Nightly | Planned, with the first parser or system call |
@@ -40,14 +41,60 @@ report is stored in the repository; every pull request shows the difference,
 and each changed line has to be explained. Growth nobody explained fails the
 check.
 
-The planned command is `cargo xtask snapshot`. None of these exist yet; each
-arrives with the feature it measures.
+The footprint snapshot exists; every other snapshot below is planned, and
+each arrives with the feature it measures.
+
+### Footprint (in place)
+
+`cargo xtask snapshot` builds the boot image and prints the footprint report.
+`cargo xtask snapshot --update` prints it and also stores it in
+`snapshots/footprint.txt`. The stored file is the expected report, and it is
+committed like any other file.
+
+The report is sorted `key: value` lines. Today it holds:
+
+- `boot image bytes`: the size of the built boot image, `BOOTX64.EFI`, the
+  file the firmware loads.
+- `third-party packages`: how many packages in `Cargo.lock` come from outside
+  the repository. The project has no dependencies, so this is 0.
+- `unsafe blocks in <file>` and `unsafe fn declarations in <file>`: for each
+  Rust file under `boot/src`, how many `unsafe { ... }` blocks and
+  `unsafe fn` declarations it contains. `unsafe` marks code the compiler
+  cannot check for memory safety, so its count is a rough measure of how much
+  code has to be trusted by hand.
+
+`cargo xtask check` builds the image again, makes the report and compares it
+with the stored one before it runs the boot test. If they differ, the check
+fails and prints every line that changed: a line that was only in the stored
+report starts with `-`, a line that is only in the new one starts with `+`.
+A changed value shows as the old line above the new one:
+
+```text
+- boot image bytes: 12288
++ boot image bytes: 12800
+```
+
+If the change is intended, run `cargo xtask snapshot --update`, commit the new
+`snapshots/footprint.txt`, and explain each changed line in the pull request.
+If it is not, remove whatever caused it.
+
+Limits to know about:
+
+- The boot image is padded to a multiple of 512 bytes, so its size only
+  changes in steps of 512. Growth smaller than that can go unseen. The unsafe
+  counts do not have this limit.
+- Only `unsafe { ... }` blocks and `unsafe fn` declarations are counted.
+  `unsafe impl`, `unsafe extern` blocks and `#[unsafe(...)]` attributes are
+  not.
+- The counter reads source text, so `unsafe` written out by a macro (a piece
+  of code that generates code) is not seen.
+- Planned: the work needed to reach the first line of output. It is not
+  measured yet.
 
 ### Performance
 
 | Snapshot | What it shows |
 |---|---|
-| Footprint | Size of the boot image, and the work needed to reach the first line of output |
 | Kernel memory | Pages in use per component, and a count of every live kernel object by type |
 | Exact leak test | An operation repeated a thousand times must return every counter to where it started |
 | Crossing counts | Messages and process switches each operation takes, such as opening a file |
