@@ -20,7 +20,9 @@ There is no kernel yet.
 
 | Part | Where | What it does |
 |---|---|---|
-| Build runner | `xtask/src/main.rs` | `build`, `run`, `test` and `check` |
+| Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check` |
+| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per boot file and third-party packages, and compares the report with the stored one |
+| Stored footprint | `snapshots/footprint.txt` | The expected footprint report. `cargo xtask snapshot --update` rewrites it |
 | Pinned compiler | `rust-toolchain.toml` | The Rust version and the UEFI build target |
 | Pull request checks | `.github/workflows/ci.yml` | Runs the checks below on every pull request |
 | Credit check | `tools/check-attribution.sh` | Fails text that credits a tool |
@@ -34,7 +36,7 @@ There is no kernel yet.
 |---|---|
 | `docs/decisions.md` | What has been decided, and why |
 | `docs/boot.md` | How the system starts |
-| `docs/testing.md` | How it is tested, and the planned snapshots |
+| `docs/testing.md` | How it is tested, the footprint snapshot, and the planned snapshots |
 | `docs/workflow.md` | Who does what, and the path of a task |
 | `AGENTS.md` | The rules every contributor follows |
 

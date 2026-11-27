@@ -26,7 +26,8 @@ You need [Rust](https://rustup.rs) and [QEMU](https://www.qemu.org). The pinned 
 | `cargo xtask build` | Builds the boot image into `target/esp` |
 | `cargo xtask run` | Boots it in QEMU with a window and serial output |
 | `cargo xtask test` | Boots it in QEMU with no window and checks the output |
-| `cargo xtask check` | Format check, lints and the boot test |
+| `cargo xtask snapshot` | Builds the boot image and prints the footprint report; `--update` also stores it in `snapshots/footprint.txt` |
+| `cargo xtask check` | Format check, lints, unit tests, the footprint snapshot and the boot test |
 
 On Debian or Ubuntu, QEMU's UEFI firmware is a separate package: `sudo apt install qemu-system-x86 ovmf`. On Windows and macOS it comes with QEMU.
 

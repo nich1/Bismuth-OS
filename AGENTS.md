@@ -16,6 +16,7 @@ Read these first, in this order:
 | `cargo xtask build` | Builds the boot image into `target/esp` |
 | `cargo xtask run` | Boots it in QEMU with a window and serial output |
 | `cargo xtask test` | Boots it in QEMU with no window and checks the output |
+| `cargo xtask snapshot` | Builds the boot image and prints the footprint report; `--update` also stores it in `snapshots/footprint.txt` |
 | `cargo xtask check` | Everything the pull request check runs |
 
 Once per clone, turn on the commit hook:

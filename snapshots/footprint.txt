@@ -1,0 +1,10 @@
+boot image bytes: 12288
+third-party packages: 0
+unsafe blocks in boot/src/main.rs: 3
+unsafe blocks in boot/src/port.rs: 3
+unsafe blocks in boot/src/serial.rs: 3
+unsafe blocks in boot/src/uefi.rs: 2
+unsafe fn declarations in boot/src/main.rs: 1
+unsafe fn declarations in boot/src/port.rs: 3
+unsafe fn declarations in boot/src/serial.rs: 0
+unsafe fn declarations in boot/src/uefi.rs: 1
