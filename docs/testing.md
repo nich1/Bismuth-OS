@@ -10,7 +10,7 @@ agent and the pull request checks all run exactly the same thing.
 |---|---|---|---|
 | Compiler and lints | Type errors, undocumented unsafe code | Every build | In place |
 | Unit tests on the development machine | Logic bugs in code that needs no hardware | Every pull request | In place for `xtask` and the ELF reader; the kernel follows |
-| Boot scenarios in QEMU | The system not working end to end | Every pull request | One scenario |
+| Boot scenarios in QEMU | The system not working end to end | Every pull request | Five scenarios, below |
 | Before-and-after snapshots | Growth nobody explained | Every pull request | One snapshot, footprint; the rest planned |
 | Mutation testing | Tests that still pass when the code is broken | Nightly, and on changed code | Planned, once the kernel has unit tests |
 | Miri | Undefined behaviour in unsafe code | Every pull request | Planned, with the first unsafe data structure |
@@ -21,6 +21,27 @@ agent and the pull request checks all run exactly the same thing.
 
 Nightly jobs run on the code host's own machines. Agents only look at what
 fails.
+
+## Boot scenarios
+
+`cargo xtask test` builds the boot stage with the `qemu-exit` feature and
+boots it in QEMU once per scenario, each on its own disk under
+`target/boot-scenarios`. Each must print `BISMUTH BOOT OK` and then its own
+line about the kernel file on the serial port, and QEMU must exit with the
+expected code within two minutes:
+
+| Scenario | Kernel file on the disk | Expected line | Exit code |
+|---|---|---|---|
+| normal | The real kernel | `BISMUTH KERNEL FILE OK entry=0x<hex> segments=<n> bytes=<n>`, with the values the ELF reader finds in the same file on the development machine | 33 |
+| missing | None | `BISMUTH KERNEL FILE ERROR: file not found` | 35 |
+| empty | Zero bytes | `BISMUTH KERNEL FILE ERROR: file is empty` | 35 |
+| bad-signature | The real kernel with its second byte changed | `BISMUTH KERNEL FILE ERROR: ELF reader: BadSignature` | 35 |
+| truncated | The real kernel cut in the middle of its last program header | `BISMUTH KERNEL FILE ERROR: ELF reader: ProgramHeadersOutsideFile` | 35 |
+
+Exit code 33 means the boot stage read and checked the kernel file; 35 means
+it reported a failure. Both come from the `isa-debug-exit` device, so a
+failing scenario ends in seconds instead of waiting for the time limit. All
+scenarios run even when one fails, and each prints its name, time and lines.
 
 ## Rules
 

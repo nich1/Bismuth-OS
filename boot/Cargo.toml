@@ -11,5 +11,9 @@ publish.workspace = true
 # turns this on; it must stay off for real hardware.
 qemu-exit = []
 
+[dependencies]
+# Part of this repository, not a third-party package.
+bismuth-elf = { path = "../elf" }
+
 [lints]
 workspace = true

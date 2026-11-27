@@ -20,6 +20,9 @@ const LEN: usize = 512;
 const ENTRY: u64 = 0x20_1110;
 /// Where the program header table starts in a test file.
 const PH_AT: usize = 64;
+/// Mixed into each segment's physical address so that it differs from the
+/// virtual one.
+const PADDR_MARK: u64 = 0x5A00_0000;
 
 fn put(file: &mut [u8], at: usize, value: &[u8]) {
     file[at..at + value.len()].copy_from_slice(value);
@@ -106,7 +109,9 @@ fn build(headers: &[Ph]) -> Vec<u8> {
         put32(&mut file, at + 4, ph.flags);
         put64(&mut file, at + 8, ph.offset);
         put64(&mut file, at + 16, ph.address);
-        put64(&mut file, at + 24, ph.address);
+        // p_paddr: a value no test expects, so reading it in place of
+        // p_vaddr fails.
+        put64(&mut file, at + 24, PADDR_MARK ^ ph.address);
         put64(&mut file, at + 32, ph.file_size);
         put64(&mut file, at + 40, ph.memory_size);
         put64(&mut file, at + 48, ph.align);
@@ -506,4 +511,18 @@ fn damaged_files_are_rejected_or_stay_inside_the_file() {
         accepted > 1_000 && rejected > 1_000,
         "{accepted} accepted, {rejected} rejected"
     );
+}
+
+#[test]
+fn an_empty_table_follows_the_same_bounds_as_any_other() {
+    // No program headers, so the table is empty. Starting at the end of the
+    // file it is an empty range inside the file, as for a table that ends
+    // there; starting past the end it is not inside the file at all.
+    let mut file = build(&[]);
+    put64(&mut file, 32, LEN as u64);
+    assert_eq!(Elf::parse(&file).map(|elf| elf.segments().count()), Ok(0));
+    for past in [LEN as u64 + 1, u64::MAX] {
+        put64(&mut file, 32, past);
+        assert_eq!(error(&file), Error::ProgramHeadersOutsideFile);
+    }
 }

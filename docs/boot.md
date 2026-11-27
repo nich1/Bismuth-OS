@@ -23,7 +23,7 @@ The firmware calls the function `efi_main` and passes it a pointer to the
 *system table*: a structure of pointers to services the firmware offers, such
 as printing text.
 
-The boot stage then does three things:
+The boot stage then does four things:
 
 1. **Writes `BISMUTH BOOT OK` to the serial port.** The serial port is an old,
    very simple device: send it a byte and the byte goes out on a wire. It
@@ -31,13 +31,47 @@ The boot stage then does three things:
    out of a machine this early.
 2. **Prints a line on the firmware's console,** using the system table, so
    something also appears on the screen.
-3. **Stops.** It puts the processor to sleep in a loop.
+3. **Reads the kernel file and checks it.** It reads
+   `EFI\BISMUTH\KERNEL.ELF` from the disk it was started from, hands the bytes
+   to the `elf` reader (described below) and writes one more line to the
+   serial port: either `BISMUTH KERNEL FILE OK entry=0x1280 segments=3
+   bytes=6152` (the numbers are an example), or a line starting
+   `BISMUTH KERNEL FILE ERROR:` with the reason. The reasons are: file not
+   found, file is empty, file is too large (the limit is 64 MiB), reading
+   failed, or the name of the error the ELF reader returned.
+4. **Stops.** It puts the processor to sleep in a loop.
 
-There is now a kernel file on the boot disk, but nothing loads it. The boot
-stage does not yet read it, and it still prints its line and stops. The next
-steps are for this stage to read the file from disk, then place it in memory,
-collect what the kernel needs to know about the machine (above all, the map
-of usable memory), tell the firmware to step aside, and jump into the kernel.
+Each failure gets its own line, and then the boot stage stops, because it is
+the only thing running. There is no screen to rely on and nobody to report to,
+so a clear message on the serial port is the only way to learn what went
+wrong.
+
+The boot stage keeps the file's bytes in memory for the next step. It does not
+yet place the kernel in memory, collect what the kernel needs to know about
+the machine (above all, the map of usable memory), tell the firmware to step
+aside, or jump into the kernel. Those come next.
+
+### How the file is read
+
+The firmware offers its services as *protocols*: a named set of functions,
+looked up by a 128-bit identifier. The boot stage asks the firmware for a
+protocol by identifier and gets back a pointer to the functions. The lookup
+itself, and requests for memory, go through the *boot services table*, which
+the system table points to. Three protocols are used:
+
+1. The *Loaded Image Protocol*, asked about the boot stage itself, says which
+   disk it was loaded from. That is how it finds the right disk without
+   guessing: the kernel file is on the same disk as the boot stage.
+2. The *Simple File System Protocol* on that disk opens its top-level folder.
+3. The *File Protocol* opens the kernel file by path, finds its size (by
+   moving to the end and asking where it is), and reads it.
+
+The boot stage has no memory of its own to put the file in: nothing has set up
+a heap, and the firmware still owns the machine's memory. So it asks the
+firmware to allocate a block of the right size and reads the file into that. It reads the
+whole file before checking anything, because the ELF reader works on a
+complete block of bytes and every offset it follows has to be checked against
+the file's real length.
 
 ## The kernel file
 
@@ -67,7 +101,7 @@ and the loadable segments, or an error that says what is wrong. It accepts only
 64-bit x86-64 programs. It does not load anything, and it ignores sections,
 symbols and relocations.
 
-It is written defensively because it will run inside the boot stage, on a file
+It is written defensively because it runs inside the boot stage, on a file
 read from disk, before anything else protects the machine. A damaged or
 malicious file must produce an error, never a crash and never a read outside
 the file. So the library is safe Rust, uses no allocation, and has lints that
@@ -89,17 +123,28 @@ Tests cover this in three ways:
 
 QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
 
-1. It builds the boot stage and copies it to `target/esp/EFI/BOOT/BOOTX64.EFI`.
-2. It starts QEMU with UEFI firmware and presents the `target/esp` folder as
-   a FAT disk. No window is shown, and the imitation serial port is connected
-   to the test.
+1. It builds the boot stage and the kernel, and copies the boot stage to
+   `target/esp/EFI/BOOT/BOOTX64.EFI`.
+2. For each scenario below it lays out a separate disk folder, starts QEMU
+   with UEFI firmware and presents that folder as a FAT disk. No window is
+   shown, and the imitation serial port is connected to the test.
 3. The firmware finds and runs the boot stage, as it would on a real PC.
-4. The boot stage prints its line. Because it was built with the `qemu-exit`
-   feature, it then writes to a special QEMU device that makes QEMU quit with
-   exit code 33.
-5. The test passes if the serial output contains `BISMUTH BOOT OK` and QEMU
-   exited with code 33 within two minutes. Anything else fails, and the
-   captured output is shown.
+4. The boot stage prints its lines. Because it was built with the `qemu-exit`
+   feature, it then writes to a special QEMU device that makes QEMU quit:
+   with exit code 33 if the kernel file was read and checked, 35 if not.
+5. A scenario passes if the serial output contains `BISMUTH BOOT OK` and then
+   its expected line, and QEMU exits with the expected code within the time
+   limit. Anything else fails, and the captured output is shown.
+
+The five scenarios:
+
+| Disk | Expected line | Exit code |
+|---|---|---|
+| The real kernel file | `BISMUTH KERNEL FILE OK entry=... segments=... bytes=...`, matching what the ELF reader finds in the same file | 33 |
+| No kernel file | `BISMUTH KERNEL FILE ERROR: file not found` | 35 |
+| An empty file | `BISMUTH KERNEL FILE ERROR: file is empty` | 35 |
+| A file whose signature is damaged | `BISMUTH KERNEL FILE ERROR: ELF reader: BadSignature` | 35 |
+| A file cut off in the middle of the segment table | `BISMUTH KERNEL FILE ERROR: ELF reader: ProgramHeadersOutsideFile` | 35 |
 
 The `qemu-exit` feature is off in normal builds. On a real PC nothing answers
 at that port, so the write is left out entirely.
@@ -124,9 +169,12 @@ structure.
 
 ## Where the firmware layouts come from
 
-The structures in `boot/src/uefi.rs` follow the UEFI specification: section 4
-for the system table and section 12.4 for text output. Only the fields the
-boot stage reads are declared.
+The structures in `boot/src/uefi.rs` and the files beside it follow the UEFI
+specification (version 2.10), declared by hand, and their comments name the
+sections: 4.3 for the system table, 4.4 for the boot services table, 7.2 for
+memory allocation, 7.3 for looking up a protocol, 9.1 for the Loaded Image
+Protocol, 12.4 for text output, 13.4 for the Simple File System Protocol and
+13.5 for the File Protocol. Only the fields the boot stage uses are declared.
 
 The ELF layouts in `elf/src/lib.rs` follow the System V ABI's ELF
 specification (chapters 4 and 5) and its x86-64 supplement, as the comments

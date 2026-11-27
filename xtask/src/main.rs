@@ -15,18 +15,25 @@ use std::time::{Duration, Instant};
 mod footprint;
 mod host;
 
+// The boot stage's report text has no firmware code, so its unit tests run
+// here, on the development machine, where the boot stage itself cannot.
+#[cfg(test)]
+#[path = "../../boot/src/report.rs"]
+mod boot_report;
+
 const USAGE: &str = "\
 usage: cargo xtask <task>
 
 tasks:
   build   build the boot image and the kernel into target/esp
   run     build, then boot it in QEMU with a window and serial output
-  test    build, boot it in QEMU without a window, and check what it printed
+  test    build, then boot each boot scenario in QEMU without a window and
+          check what it printed and how QEMU exited
   snapshot [--update]
           build, then print the footprint report; --update also stores it
           in snapshots/footprint.txt
   check   everything the pull request check runs: format, lint, unit tests,
-          footprint snapshot, kernel file check, boot test
+          footprint snapshot, kernel file check, boot scenarios
 
 code host tasks (need gh, GitHub's command-line tool):
   issue-read <number>
@@ -51,8 +58,13 @@ const KERNEL_PACKAGE: &str = "bismuth-kernel";
 const BOOT_MARKER: &str = "BISMUTH BOOT OK";
 /// What QEMU exits with when the boot stage reports success: `(0x10 << 1) | 1`.
 const QEMU_SUCCESS_EXIT: i32 = 33;
-/// How long the boot test may take before it is treated as a hang.
+/// What QEMU exits with when the boot stage reports that the kernel file is
+/// missing or wrong: `(0x11 << 1) | 1`.
+const QEMU_FAILURE_EXIT: i32 = 35;
+/// How long one boot scenario may take before it is treated as a hang.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Where the boot scenarios' disks are laid out, one folder each.
+const SCENARIO_DISKS: &str = "target/boot-scenarios";
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -306,18 +318,168 @@ fn check_snapshot() -> Result<()> {
 /// Boots the image in QEMU with a window, serial output in this terminal.
 fn run() -> Result<()> {
     build(false)?;
-    let mut qemu = qemu_command()?;
+    let mut qemu = qemu_command("target/esp")?;
     qemu.args(["-serial", "stdio"]);
     run_checked(&mut qemu, "QEMU")
 }
 
-/// Boots the image in QEMU with no window and checks the result.
+/// One boot of the boot stage in QEMU, on a disk of its own.
+struct Scenario {
+    /// The name printed with the result, also the disk's folder name.
+    name: &'static str,
+    /// The kernel file to put on the disk, or `None` for no file.
+    kernel: Option<Vec<u8>>,
+    /// Lines the serial output must contain, in this order.
+    lines: Vec<String>,
+    /// The exit code QEMU must end with.
+    exit_code: i32,
+}
+
+impl Scenario {
+    fn new(name: &'static str, kernel: Option<&[u8]>, line: String, exit_code: i32) -> Self {
+        Scenario {
+            name,
+            kernel: kernel.map(<[u8]>::to_vec),
+            lines: vec![BOOT_MARKER.to_string(), line],
+            exit_code,
+        }
+    }
+
+    fn error(name: &'static str, kernel: Option<&[u8]>, reason: &str) -> Self {
+        let line = format!("BISMUTH KERNEL FILE ERROR: {reason}");
+        Scenario::new(name, kernel, line, QEMU_FAILURE_EXIT)
+    }
+}
+
+/// The boot scenarios, built from the real kernel file `kernel`.
 ///
-/// The test passes when the serial output contains [`BOOT_MARKER`] and QEMU
-/// exits with [`QEMU_SUCCESS_EXIT`] within [`BOOT_TIMEOUT`].
+/// The normal one expects the entry point and loadable segment count that
+/// the ELF reader finds in the same file here, as [`check_kernel`] reports.
+fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
+    let elf = bismuth_elf::Elf::parse(kernel)
+        .map_err(|error| format!("the ELF reader rejected the kernel: {error:?}"))?;
+    let ok = format!(
+        "BISMUTH KERNEL FILE OK entry={:#x} segments={} bytes={}",
+        elf.entry(),
+        elf.segments().count(),
+        kernel.len()
+    );
+    let mut bad_signature = kernel.to_vec();
+    bad_signature[1] = b'X';
+    // Cut in the middle of the last program header. gABI ch. 4, "ELF
+    // Header": `e_phoff` is the eight bytes at 32 and `e_phnum` the two at
+    // 56; a program header is 56 bytes.
+    let table = u64::from_le_bytes(kernel[32..40].try_into().expect("eight bytes"));
+    let count = u16::from_le_bytes([kernel[56], kernel[57]]);
+    let table = usize::try_from(table).map_err(|_| "the kernel's table offset is too large")?;
+    let cut = table + 56 * usize::from(count.max(1) - 1) + 28;
+    let truncated = kernel
+        .get(..cut)
+        .ok_or("the kernel is too short to truncate")?;
+    Ok(vec![
+        Scenario::new("normal", Some(kernel), ok, QEMU_SUCCESS_EXIT),
+        Scenario::error("missing", None, "file not found"),
+        Scenario::error("empty", Some(&[]), "file is empty"),
+        Scenario::error(
+            "bad-signature",
+            Some(&bad_signature),
+            "ELF reader: BadSignature",
+        ),
+        Scenario::error(
+            "truncated",
+            Some(truncated),
+            "ELF reader: ProgramHeadersOutsideFile",
+        ),
+    ])
+}
+
+/// Builds the boot stage with `qemu-exit`, runs every boot scenario and
+/// fails if any did not behave as expected.
 fn test() -> Result<()> {
     build(true)?;
-    let mut qemu = qemu_command()?;
+    let kernel = fs::read(kernel_image())
+        .map_err(|error| format!("could not read the kernel file: {error}"))?;
+    let mut failed = Vec::new();
+    for scenario in scenarios(&kernel)? {
+        let started = Instant::now();
+        let disk = scenario_disk(&scenario)?;
+        let (status, serial) = boot(&disk)?;
+        let seconds = started.elapsed().as_secs_f32();
+        if let Some(reason) = boot_failure(&scenario, status, &serial) {
+            eprintln!(
+                "boot scenario {} FAILED after {seconds:.1} s: {reason}\n\
+                 --- serial output ---\n{}\n--- end ---",
+                scenario.name,
+                serial.trim_end()
+            );
+            failed.push(scenario.name);
+            continue;
+        }
+        println!(
+            "boot scenario {} passed in {seconds:.1} s, exit code {}:",
+            scenario.name, scenario.exit_code
+        );
+        for line in &scenario.lines {
+            println!("  {line}");
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("boot scenarios failed: {}", failed.join(", ")))
+    }
+}
+
+/// Lays out the scenario's disk: the boot image from `target/esp`, and its
+/// kernel file if it has one. Returns the folder, relative to the root.
+fn scenario_disk(scenario: &Scenario) -> Result<String> {
+    let disk = format!("{SCENARIO_DISKS}/{}", scenario.name);
+    let dir = root().join(&disk);
+    if dir.exists() {
+        fs::remove_dir_all(&dir)
+            .map_err(|error| format!("could not clear {}: {error}", dir.display()))?;
+    }
+    let efi = dir.join("EFI");
+    copy_file(&boot_image(), &efi.join("BOOT").join("BOOTX64.EFI"))?;
+    if let Some(kernel) = &scenario.kernel {
+        let folder = efi.join("BISMUTH");
+        fs::create_dir_all(&folder)
+            .map_err(|error| format!("could not create {}: {error}", folder.display()))?;
+        fs::write(folder.join("KERNEL.ELF"), kernel)
+            .map_err(|error| format!("could not write the kernel into {disk}: {error}"))?;
+    }
+    Ok(disk)
+}
+
+/// Says why a boot that ended with exit code `status` (`None` for a hang)
+/// and printed `serial` does not meet `scenario`, or `None` if it does.
+fn boot_failure(scenario: &Scenario, status: Option<i32>, serial: &str) -> Option<String> {
+    let Some(code) = status else {
+        return Some(format!(
+            "QEMU did not exit within {} seconds",
+            BOOT_TIMEOUT.as_secs()
+        ));
+    };
+    if code != scenario.exit_code {
+        return Some(format!(
+            "QEMU exited with code {code}, expected {}",
+            scenario.exit_code
+        ));
+    }
+    let mut printed = serial.lines().map(|line| line.trim_end_matches('\r'));
+    for line in &scenario.lines {
+        if !printed.any(|printed| printed == line) {
+            return Some(format!("serial output did not contain {line:?} in order"));
+        }
+    }
+    None
+}
+
+/// Boots the folder `disk` in QEMU with no window. Returns QEMU's exit code,
+/// or `None` if it ran past [`BOOT_TIMEOUT`] or was stopped by a signal, and
+/// the serial output.
+fn boot(disk: &str) -> Result<(Option<i32>, String)> {
+    let mut qemu = qemu_command(disk)?;
     qemu.args(["-serial", "stdio", "-display", "none", "-no-reboot"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .stdin(Stdio::null())
@@ -338,7 +500,7 @@ fn test() -> Result<()> {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            Ok(Some(status)) => break status.code(),
             Ok(None) if Instant::now() >= deadline => {
                 // Killing can only fail if QEMU has just exited by itself.
                 let _ = child.kill();
@@ -350,29 +512,7 @@ fn test() -> Result<()> {
         }
     };
     let serial = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
-
-    let failure = match status {
-        None => Some(format!(
-            "QEMU did not exit within {} seconds",
-            BOOT_TIMEOUT.as_secs()
-        )),
-        Some(status) if status.code() != Some(QEMU_SUCCESS_EXIT) => Some(format!(
-            "QEMU exited with {status}, expected exit code {QEMU_SUCCESS_EXIT}"
-        )),
-        Some(_) if !serial.contains(BOOT_MARKER) => {
-            Some(format!("serial output did not contain {BOOT_MARKER:?}"))
-        }
-        Some(_) => None,
-    };
-    match failure {
-        None => {
-            println!("boot test passed: serial output contained {BOOT_MARKER:?}");
-            Ok(())
-        }
-        Some(reason) => Err(format!(
-            "boot test failed: {reason}\n--- serial output ---\n{serial}\n--- end ---"
-        )),
-    }
+    Ok((status, serial))
 }
 
 /// Runs every check the pull request pipeline runs.
@@ -429,11 +569,11 @@ fn check() -> Result<()> {
     test()
 }
 
-/// A QEMU command set up to boot `target/esp` through UEFI firmware.
+/// A QEMU command set up to boot the folder `disk` through UEFI firmware.
 ///
 /// It runs from the repository root so the disk can be given as a relative
 /// path, which avoids quoting problems with drive letters and spaces.
-fn qemu_command() -> Result<Command> {
+fn qemu_command(disk: &str) -> Result<Command> {
     let root = root();
     let qemu = find_qemu()?;
     let firmware = find_firmware()?;
@@ -456,7 +596,9 @@ fn qemu_command() -> Result<Command> {
             .arg("if=pflash,format=raw,file=target/uefi-vars.fd");
     }
     // QEMU presents the directory as a FAT-formatted disk.
-    command.args(["-drive", "format=raw,file=fat:rw:target/esp"]);
+    command
+        .arg("-drive")
+        .arg(format!("format=raw,file=fat:rw:{disk}"));
     Ok(command)
 }
 
@@ -610,7 +752,58 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{describe_kernel, paths_in_markdown};
+    use super::{Scenario, boot_failure, describe_kernel, paths_in_markdown, scenarios};
+
+    fn missing() -> Scenario {
+        Scenario::error("missing", None, "file not found")
+    }
+
+    #[test]
+    fn a_boot_with_the_lines_in_order_and_the_right_code_passes() {
+        let serial = "firmware noise\r\nBISMUTH BOOT OK\r\nconsole\r\n\
+                      BISMUTH KERNEL FILE ERROR: file not found\r\n";
+        assert_eq!(boot_failure(&missing(), Some(35), serial), None);
+    }
+
+    #[test]
+    fn a_boot_fails_on_a_hang_a_wrong_code_or_a_missing_line() {
+        let serial = "BISMUTH BOOT OK\nBISMUTH KERNEL FILE ERROR: file not found\n";
+        let failure = |status, serial| boot_failure(&missing(), status, serial).expect("fails");
+        assert!(failure(None, serial).contains("did not exit"));
+        assert!(failure(Some(33), serial).contains("code 33, expected 35"));
+        assert!(failure(Some(35), "BISMUTH BOOT OK\n").contains("did not contain"));
+        // Out of order, or only part of a line.
+        let reversed = "BISMUTH KERNEL FILE ERROR: file not found\nBISMUTH BOOT OK\n";
+        assert!(failure(Some(35), reversed).contains("in order"));
+        let partial = "BISMUTH BOOT OK\nBISMUTH KERNEL FILE ERROR: file not found here\n";
+        assert!(failure(Some(35), partial).contains("did not contain"));
+    }
+
+    #[test]
+    fn the_scenarios_damage_the_kernel_as_named() {
+        let kernel = kernel_file(0b101, 0x20_0040, 1);
+        let all = scenarios(&kernel).expect("scenarios");
+        let names: Vec<_> = all.iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            ["normal", "missing", "empty", "bad-signature", "truncated"]
+        );
+        assert_eq!(
+            all[0].lines[1],
+            "BISMUTH KERNEL FILE OK entry=0x200040 segments=1 bytes=4096"
+        );
+        assert_eq!(all[0].exit_code, 33);
+        assert_eq!(all[1].kernel, None);
+        assert_eq!(all[2].kernel.as_deref(), Some(&[][..]));
+        for (scenario, error) in [
+            (&all[3], bismuth_elf::Error::BadSignature),
+            (&all[4], bismuth_elf::Error::ProgramHeadersOutsideFile),
+        ] {
+            let file = scenario.kernel.as_deref().expect("has a file");
+            assert_eq!(bismuth_elf::Elf::parse(file).map(|_| ()), Err(error));
+            assert_eq!(scenario.exit_code, 35);
+        }
+    }
 
     /// A 4 KiB x86-64 ELF executable whose one program header is a loadable
     /// segment with `flags`, holding the whole file at 0x20_0000, and whose
