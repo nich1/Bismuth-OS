@@ -1,0 +1,10 @@
+[package]
+name = "bismuth-kernel"
+description = "Bismuth's kernel, built as an ELF file for the boot stage to load"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

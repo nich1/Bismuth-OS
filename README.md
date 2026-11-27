@@ -4,7 +4,7 @@ Bismuth is an original operating system written in Rust. It is not based on Linu
 
 ## Status
 
-Early. A boot stage starts under UEFI firmware in QEMU and prints a line. There is no kernel yet.
+Early. A boot stage starts under UEFI firmware in QEMU and prints a line. A kernel program is built alongside it, but nothing loads it yet.
 
 ## Direction
 
@@ -19,15 +19,15 @@ The reasoning behind these is in [docs/decisions.md](docs/decisions.md). How the
 
 ## Building and running
 
-You need [Rust](https://rustup.rs) and [QEMU](https://www.qemu.org). The pinned Rust version and the UEFI build target install themselves the first time you run a command here.
+You need [Rust](https://rustup.rs) and [QEMU](https://www.qemu.org). The pinned Rust version and the build targets install themselves the first time you run a command here.
 
 | Command | What it does |
 |---|---|
-| `cargo xtask build` | Builds the boot image into `target/esp` |
+| `cargo xtask build` | Builds the boot image and the kernel into `target/esp` |
 | `cargo xtask run` | Boots it in QEMU with a window and serial output |
 | `cargo xtask test` | Boots it in QEMU with no window and checks the output |
 | `cargo xtask snapshot` | Builds the boot image and prints the footprint report; `--update` also stores it in `snapshots/footprint.txt` |
-| `cargo xtask check` | Format check, lints, unit tests, the footprint snapshot and the boot test |
+| `cargo xtask check` | Format check, lints, unit tests, the footprint snapshot, the kernel file check and the boot test |
 | `cargo xtask pr-open`, `pr-edit`, `pr-ready`, `pr-wait` | Push the branch and open its pull request, replace its description, mark it ready, wait for its checks |
 | `cargo xtask issue-read`, `issue-comment`, `issue-new` | Read an issue with its comments, comment on one, file one |
 

@@ -13,18 +13,29 @@ something.
 | Serial output | `boot/src/serial.rs` | Sets up the first serial port and writes text to it | `cargo xtask test` reads what it prints |
 | Firmware interface | `boot/src/uefi.rs` | The few UEFI structures the boot stage uses, and the firmware text console | `cargo xtask run` shows the console line |
 | Port access | `boot/src/port.rs` | Reads and writes x86 I/O ports | Used by serial output |
+| Kernel | `kernel/src/main.rs` | A separate program, built as an ELF file for the `x86_64-unknown-none` target. Its entry point only stops the processor. Nothing loads it yet | `cargo xtask check` reads its file |
+| Processor instructions | `kernel/src/cpu.rs` | The kernel's only `unsafe` code: the halt loop | Used by the kernel |
+| ELF reader | `elf/src/lib.rs` | Safe, allocation-free library that checks an ELF file and reports its entry point and loadable segments, or an error. For the boot stage, later | `cargo xtask check` runs its unit tests (`elf/src/tests.rs`) and runs it on the kernel file |
 
-There is no kernel yet.
+## The boot disk
+
+`cargo xtask build` lays it out in the target/esp folder. These paths are
+written without code marks because they exist only after a build:
+
+| File | What it is |
+|---|---|
+| EFI/BOOT/BOOTX64.EFI | The boot stage, which the firmware runs |
+| EFI/BISMUTH/KERNEL.ELF | The kernel. Nothing reads it at boot yet |
 
 ## Building and checking
 
 | Part | Where | What it does |
 |---|---|---|
-| Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands |
+| Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands. `check` also runs the ELF reader on the kernel file |
 | Code host commands | `xtask/src/host.rs` | `pr-open`, `pr-edit`, `pr-ready`, `pr-wait`, `issue-read`, `issue-comment` and `issue-new`, through `gh`. Checks every title and body with the rule in `tools/check-attribution.sh` before sending it |
-| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per boot file and third-party packages, and compares the report with the stored one |
+| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per file of the boot stage, kernel and ELF reader, and third-party packages, and compares the report with the stored one |
 | Stored footprint | `snapshots/footprint.txt` | The expected footprint report. `cargo xtask snapshot --update` rewrites it |
-| Pinned compiler | `rust-toolchain.toml` | The Rust version and the UEFI build target |
+| Pinned compiler | `rust-toolchain.toml` | The Rust version and the build targets for the boot stage (UEFI) and the kernel |
 | Boot checks | `.github/workflows/ci.yml` | Runs `cargo xtask check` on every pull request and on `main`, but not when only a title or description is edited |
 | Text checks | `.github/workflows/text.yml` | Runs the authorship, naming and workflow checks below on every pull request and on `main`, and again when a title or description is edited |
 | Credit check | `tools/check-attribution.sh` | Fails text that credits a tool |

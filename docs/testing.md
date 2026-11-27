@@ -9,12 +9,12 @@ agent and the pull request checks all run exactly the same thing.
 | Layer | What it catches | When it runs | Status |
 |---|---|---|---|
 | Compiler and lints | Type errors, undocumented unsafe code | Every build | In place |
-| Unit tests on the development machine | Logic bugs in code that needs no hardware | Every pull request | In place for `xtask`; the kernel follows |
+| Unit tests on the development machine | Logic bugs in code that needs no hardware | Every pull request | In place for `xtask` and the ELF reader; the kernel follows |
 | Boot scenarios in QEMU | The system not working end to end | Every pull request | One scenario |
 | Before-and-after snapshots | Growth nobody explained | Every pull request | One snapshot, footprint; the rest planned |
 | Mutation testing | Tests that still pass when the code is broken | Nightly, and on changed code | Planned, once the kernel has unit tests |
 | Miri | Undefined behaviour in unsafe code | Every pull request | Planned, with the first unsafe data structure |
-| Fuzzing | Crashes on hostile input | Nightly | Planned, with the first parser or system call |
+| Fuzzing | Crashes on hostile input | Nightly | Planned. The first parser, the ELF reader, has a fixed-seed mutation test among its unit tests |
 | Proofs | Core rules holding for every possible input | Every pull request that touches the core | Planned, with the memory manager |
 | Benchmarks with thresholds | Slowdowns | Every pull request | Planned, once there is something to measure |
 | A run on real hardware | Whatever QEMU hides | At milestones | Planned |
@@ -58,7 +58,7 @@ The report is sorted `key: value` lines. Today it holds:
 - `third-party packages`: how many packages in `Cargo.lock` come from outside
   the repository. The project has no dependencies, so this is 0.
 - `unsafe blocks in <file>` and `unsafe fn declarations in <file>`: for each
-  Rust file under `boot/src`, how many `unsafe { ... }` blocks and
+  Rust file under `boot/src`, `kernel/src` and `elf/src`, how many `unsafe { ... }` blocks and
   `unsafe fn` declarations it contains. `unsafe` marks code the compiler
   cannot check for memory safety, so its count is a rough measure of how much
   code has to be trusted by hand.

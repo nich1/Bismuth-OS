@@ -13,8 +13,8 @@ use crate::Result;
 /// Where the expected report is stored, relative to the repository root.
 pub const STORED: &str = "snapshots/footprint.txt";
 
-/// The folder whose Rust files are scanned for `unsafe`.
-const BOOT_SOURCES: &str = "boot/src";
+/// The folders whose Rust files are scanned for `unsafe`.
+const SOURCES: &[&str] = &["boot/src", "elf/src", "kernel/src"];
 
 /// How many `unsafe` items one Rust source file contains.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -277,7 +277,7 @@ pub fn difference(expected: &str, actual: &str) -> Option<String> {
 pub struct Footprint {
     /// Size of the built boot image file.
     pub boot_image_bytes: u64,
-    /// `unsafe` counts per boot source file, by forward-slash path.
+    /// `unsafe` counts per source file, by forward-slash path.
     pub unsafe_by_file: Vec<(String, UnsafeCounts)>,
     /// Packages in `Cargo.lock` that come from outside the repository.
     pub third_party_packages: usize,
@@ -306,7 +306,9 @@ pub fn measure(root: &Path, boot_image: &Path) -> Result<Footprint> {
 
     let mut files = Vec::new();
     // In the order the folder lists them; [`report`] sorts its lines.
-    rust_files(&root.join(BOOT_SOURCES), BOOT_SOURCES, &mut files)?;
+    for dir in SOURCES {
+        rust_files(&root.join(dir), dir, &mut files)?;
+    }
     let mut unsafe_by_file = Vec::new();
     for path in files {
         let source = fs::read_to_string(root.join(&path))
@@ -571,6 +573,8 @@ mod tests {
         tree.write("boot/src/main.rs", "unsafe fn a() {}");
         tree.write("boot/src/notes.txt", "unsafe { not rust }");
         tree.write("boot/src/inner/deep.rs", "fn b() { unsafe { c() } }");
+        tree.write("elf/src/lib.rs", "fn d() {}");
+        tree.write("kernel/src/main.rs", "unsafe fn e() { unsafe { f() } }");
         tree.write(
             "Cargo.lock",
             "[[package]]\nname = \"outside\"\nsource = \"registry+https://example.com\"\n",
@@ -593,6 +597,14 @@ mod tests {
                     "boot/src/main.rs".to_owned(),
                     UnsafeCounts { blocks: 0, fns: 1 }
                 ),
+                (
+                    "elf/src/lib.rs".to_owned(),
+                    UnsafeCounts { blocks: 0, fns: 0 }
+                ),
+                (
+                    "kernel/src/main.rs".to_owned(),
+                    UnsafeCounts { blocks: 1, fns: 1 }
+                ),
             ]
         );
     }
@@ -608,9 +620,23 @@ mod tests {
     }
 
     #[test]
+    fn measuring_fails_without_kernel_sources() {
+        let tree = TempTree::new("no-kernel");
+        tree.write("boot/src/main.rs", "fn a() {}");
+        tree.write("elf/src/lib.rs", "fn b() {}");
+        tree.write("image.efi", "1");
+        let error = measure(&tree.0, &tree.0.join("image.efi"))
+            .err()
+            .expect("fails");
+        assert!(error.contains("could not list kernel/src"), "{error}");
+    }
+
+    #[test]
     fn measuring_names_what_failed() {
         let tree = TempTree::new("errors");
         tree.write("boot/src/main.rs", "fn a() {}");
+        tree.write("elf/src/lib.rs", "fn b() {}");
+        tree.write("kernel/src/main.rs", "fn c() {}");
         let image = tree.0.join("image.efi");
 
         let error = measure(&tree.0, &image).err().expect("no image");
@@ -680,6 +706,8 @@ mod tests {
         tree.write("Cargo.lock", "version = 4\n");
         tree.write("image.efi", "1");
         tree.write("boot/src/main.rs", "");
+        tree.write("elf/src/lib.rs", "");
+        tree.write("kernel/src/main.rs", "");
         fs::write(tree.0.join("boot/src/main.rs"), [0xFF]).expect("file is written");
         let error = measure(&tree.0, &tree.0.join("image.efi"))
             .err()

@@ -19,14 +19,14 @@ const USAGE: &str = "\
 usage: cargo xtask <task>
 
 tasks:
-  build   build the boot image into target/esp
+  build   build the boot image and the kernel into target/esp
   run     build, then boot it in QEMU with a window and serial output
   test    build, boot it in QEMU without a window, and check what it printed
   snapshot [--update]
           build, then print the footprint report; --update also stores it
           in snapshots/footprint.txt
   check   everything the pull request check runs: format, lint, unit tests,
-          footprint snapshot, boot test
+          footprint snapshot, kernel file check, boot test
 
 code host tasks (need gh, GitHub's command-line tool):
   issue-read <number>
@@ -43,6 +43,10 @@ code host tasks (need gh, GitHub's command-line tool):
 const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 /// The package that becomes the boot image.
 const BOOT_PACKAGE: &str = "bismuth-boot";
+/// The Rust target for the kernel, which produces an ELF file.
+const KERNEL_TARGET: &str = "x86_64-unknown-none";
+/// The package that becomes the kernel.
+const KERNEL_PACKAGE: &str = "bismuth-kernel";
 /// The text the boot stage must print on the serial port.
 const BOOT_MARKER: &str = "BISMUTH BOOT OK";
 /// What QEMU exits with when the boot stage reports success: `(0x10 << 1) | 1`.
@@ -128,11 +132,13 @@ fn run_checked(command: &mut Command, what: &str) -> Result<()> {
     }
 }
 
-/// Builds the boot stage and lays it out as a bootable disk in `target/esp`.
+/// Builds the boot stage and the kernel and lays them out as a bootable disk
+/// in `target/esp`.
 ///
 /// UEFI firmware boots a disk by running `EFI/BOOT/BOOTX64.EFI` from it, so
-/// that is where the built program is copied. With `exit_when_done`, the boot
-/// stage is built to make QEMU quit once it has printed its message.
+/// that is where the boot stage is copied. The kernel goes to
+/// `EFI/BISMUTH/KERNEL.ELF`. With `exit_when_done`, the boot stage is built
+/// to make QEMU quit once it has printed its message.
 fn build(exit_when_done: bool) -> Result<()> {
     let mut command = cargo();
     command.args(["build", "--package", BOOT_PACKAGE, "--target", UEFI_TARGET]);
@@ -148,11 +154,32 @@ fn build(exit_when_done: bool) -> Result<()> {
         .join("debug")
         .join(format!("{BOOT_PACKAGE}.efi"));
     let image = boot_image();
-    let boot_dir = image.parent().expect("the boot image path has a folder");
-    fs::create_dir_all(boot_dir)
-        .map_err(|error| format!("could not create {}: {error}", boot_dir.display()))?;
-    fs::copy(&built, &image)
-        .map_err(|error| format!("could not copy {}: {error}", built.display()))?;
+    copy_file(&built, &image)?;
+
+    run_checked(
+        cargo().args([
+            "build",
+            "--package",
+            KERNEL_PACKAGE,
+            "--target",
+            KERNEL_TARGET,
+        ]),
+        "cargo build (kernel)",
+    )?;
+    let built = root
+        .join("target")
+        .join(KERNEL_TARGET)
+        .join("debug")
+        .join(KERNEL_PACKAGE);
+    copy_file(&built, &kernel_image())
+}
+
+/// Copies `from` to `to`, creating the folder `to` goes in.
+fn copy_file(from: &Path, to: &Path) -> Result<()> {
+    let dir = to.parent().expect("a copy target has a folder");
+    fs::create_dir_all(dir)
+        .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
+    fs::copy(from, to).map_err(|error| format!("could not copy {}: {error}", from.display()))?;
     Ok(())
 }
 
@@ -164,6 +191,61 @@ fn boot_image() -> PathBuf {
         .join("EFI")
         .join("BOOT")
         .join("BOOTX64.EFI")
+}
+
+/// Where [`build`] puts the kernel.
+fn kernel_image() -> PathBuf {
+    root()
+        .join("target")
+        .join("esp")
+        .join("EFI")
+        .join("BISMUTH")
+        .join("KERNEL.ELF")
+}
+
+/// Fails unless the kernel file has at least one loadable segment and an
+/// entry point inside an executable one, and describes the file.
+fn describe_kernel(bytes: &[u8]) -> Result<String> {
+    let elf = bismuth_elf::Elf::parse(bytes)
+        .map_err(|error| format!("the ELF reader rejected the kernel: {error:?}"))?;
+    let mut text = format!(
+        "{:?}, entry {:#x}, {} bytes\n",
+        elf.file_type(),
+        elf.entry(),
+        bytes.len()
+    );
+    for segment in elf.segments() {
+        let flags = segment.flags;
+        text.push_str(&format!(
+            "  load {:#x}: {:#x} bytes from offset {:#x}, {:#x} in memory, align {:#x}, {}{}{}\n",
+            segment.address,
+            segment.file_size,
+            segment.offset,
+            segment.memory_size,
+            segment.align,
+            if flags.read { "r" } else { "-" },
+            if flags.write { "w" } else { "-" },
+            if flags.execute { "x" } else { "-" },
+        ));
+    }
+    if elf.segments().next().is_none() {
+        return Err(format!("the kernel has no loadable segment:\n{text}"));
+    }
+    match elf.entry_segment() {
+        Some(segment) if segment.flags.execute => Ok(text),
+        _ => Err(format!(
+            "the kernel's entry point is not in an executable segment:\n{text}"
+        )),
+    }
+}
+
+/// Runs the ELF reader on the kernel file [`build`] produced.
+fn check_kernel() -> Result<()> {
+    let path = kernel_image();
+    let bytes =
+        fs::read(&path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    print!("kernel file check passed: {}", describe_kernel(&bytes)?);
+    Ok(())
 }
 
 /// Builds the boot image as `cargo xtask build` does and measures the
@@ -305,6 +387,34 @@ fn check() -> Result<()> {
         cargo().args(["clippy", "--package", "xtask", "--", "-D", "warnings"]),
         "cargo clippy (xtask)",
     )?;
+    run_checked(
+        cargo().args(["test", "--package", "bismuth-elf"]),
+        "cargo test (elf)",
+    )?;
+    run_checked(
+        cargo().args([
+            "clippy",
+            "--package",
+            "bismuth-elf",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        "cargo clippy (elf)",
+    )?;
+    run_checked(
+        cargo()
+            .args([
+                "clippy",
+                "--package",
+                KERNEL_PACKAGE,
+                "--target",
+                KERNEL_TARGET,
+            ])
+            .args(["--", "-D", "warnings"]),
+        "cargo clippy (kernel)",
+    )?;
     for features in [&[][..], &["--features", "qemu-exit"][..]] {
         run_checked(
             cargo()
@@ -315,6 +425,7 @@ fn check() -> Result<()> {
         )?;
     }
     check_snapshot()?;
+    check_kernel()?;
     test()
 }
 
@@ -499,7 +610,66 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::paths_in_markdown;
+    use super::{describe_kernel, paths_in_markdown};
+
+    /// A 4 KiB x86-64 ELF executable whose one program header is a loadable
+    /// segment with `flags`, holding the whole file at 0x20_0000, and whose
+    /// entry is `entry`. Layouts from the gABI "ELF Header" and "Program
+    /// Header" sections.
+    fn kernel_file(flags: u32, entry: u64, headers: u16) -> Vec<u8> {
+        let mut file = vec![0u8; 4096];
+        let mut put = |at: usize, bytes: &[u8]| file[at..at + bytes.len()].copy_from_slice(bytes);
+        put(0, &[0x7F, b'E', b'L', b'F', 2, 1, 1]);
+        put(16, &2u16.to_le_bytes()); // ET_EXEC
+        put(18, &62u16.to_le_bytes()); // EM_X86_64
+        put(20, &1u32.to_le_bytes());
+        put(24, &entry.to_le_bytes());
+        put(32, &64u64.to_le_bytes());
+        put(52, &64u16.to_le_bytes());
+        put(54, &56u16.to_le_bytes());
+        put(56, &headers.to_le_bytes());
+        put(64, &1u32.to_le_bytes()); // PT_LOAD
+        put(68, &flags.to_le_bytes());
+        put(80, &0x20_0000u64.to_le_bytes());
+        put(96, &4096u64.to_le_bytes());
+        put(104, &4096u64.to_le_bytes());
+        put(112, &4096u64.to_le_bytes());
+        file
+    }
+
+    #[test]
+    fn a_kernel_entered_in_an_executable_segment_passes() {
+        let text = describe_kernel(&kernel_file(0b101, 0x20_0040, 1)).expect("passes");
+        assert_eq!(
+            text,
+            "Executable, entry 0x200040, 4096 bytes\n  load 0x200000: 0x1000 bytes from \
+             offset 0x0, 0x1000 in memory, align 0x1000, r-x\n"
+        );
+    }
+
+    #[test]
+    fn a_kernel_entered_in_a_data_segment_fails() {
+        let error = describe_kernel(&kernel_file(0b110, 0x20_0040, 1)).expect_err("fails");
+        assert!(error.contains("not in an executable segment"), "{error}");
+    }
+
+    #[test]
+    fn a_kernel_entered_outside_every_segment_fails() {
+        let error = describe_kernel(&kernel_file(0b101, 0x20_1000, 1)).expect_err("fails");
+        assert!(error.contains("not in an executable segment"), "{error}");
+    }
+
+    #[test]
+    fn a_kernel_without_loadable_segments_fails() {
+        let error = describe_kernel(&kernel_file(0b101, 0x20_0040, 0)).expect_err("fails");
+        assert!(error.contains("no loadable segment"), "{error}");
+    }
+
+    #[test]
+    fn a_file_the_reader_rejects_fails() {
+        let error = describe_kernel(&[0x7F, b'E', b'L', b'F']).expect_err("fails");
+        assert_eq!(error, "the ELF reader rejected the kernel: Truncated");
+    }
 
     #[test]
     fn finds_paths_in_code_spans() {
