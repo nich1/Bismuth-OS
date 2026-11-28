@@ -12,6 +12,10 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bismuth_elf::place;
+
+#[cfg(test)]
+mod command_tables;
 mod footprint;
 mod host;
 
@@ -32,10 +36,13 @@ tasks:
   snapshot [--update]
           build, then print the footprint report; --update also stores it
           in snapshots/footprint.txt
-  check   everything the pull request check runs: format, lint, unit tests,
-          footprint snapshot, kernel file check, boot scenarios
+  check   what the CI workflow runs on a pull request: feature map check,
+          format, lint, unit tests, footprint snapshot, kernel file check,
+          boot scenarios (not the text checks)
 
 code host tasks (need gh, GitHub's command-line tool):
+  issue-list [--label <name>]
+          print the number and title of each open issue, one per line
   issue-read <number>
   issue-comment <number> --body-file <path>
   issue-new --title <text> --body-file <path> [--label <name>]
@@ -78,6 +85,8 @@ fn main() -> ExitCode {
         ["snapshot"] => snapshot(false),
         ["snapshot", "--update"] => snapshot(true),
         ["check"] => check(),
+        ["issue-list"] => host::issue_list(None),
+        ["issue-list", "--label", label] => host::issue_list(Some(label)),
         ["issue-read", n] if is_number(n) => host::issue_read(n),
         ["issue-comment", n, "--body-file", body] if is_number(n) => host::issue_comment(n, body),
         ["issue-new", "--title", title, "--body-file", body] => host::issue_new(title, body, None),
@@ -244,12 +253,9 @@ fn describe_kernel(bytes: &[u8]) -> Result<String> {
     if elf.segments().next().is_none() {
         return Err(format!("the kernel has no loadable segment:\n{text}"));
     }
-    let segments: Vec<_> = elf.segments().collect();
-    let problems = layout_problems(elf.file_type(), elf.entry(), &segments);
-    if !problems.is_empty() {
+    if let Err(error) = place::place(&elf) {
         return Err(format!(
-            "the kernel cannot be mapped as linked:\n  {}\n{text}",
-            problems.join("\n  ")
+            "the kernel cannot be placed as linked: {error:?}\n{text}"
         ));
     }
     match elf.entry_segment() {
@@ -260,72 +266,64 @@ fn describe_kernel(bytes: &[u8]) -> Result<String> {
     }
 }
 
-/// The lowest address the kernel may use: the start of the top 2 GiB of the
-/// address range, where the kernel is linked (see `docs/decisions.md`).
-const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
-/// The page size the kernel's segments will be mapped with.
-const PAGE_SIZE: u64 = 4096;
+/// The pages the boot stage should fill for the kernel file `bytes`, one
+/// buffer per loadable segment with memory, in file order, laid out here
+/// without the placement code: each segment's contents at its address's
+/// place in its first page, zeros everywhere else.
+fn page_images(bytes: &[u8], elf: &bismuth_elf::Elf) -> Vec<Vec<u8>> {
+    let page = place::PAGE_SIZE as usize;
+    let mut images = Vec::new();
+    for segment in elf.segments().filter(|s| s.memory_size > 0) {
+        let start = (segment.address % place::PAGE_SIZE) as usize;
+        let end = start + segment.memory_size as usize;
+        let mut image = vec![0u8; end.div_ceil(page) * page];
+        let offset = segment.offset as usize;
+        let contents = &bytes[offset..offset + segment.file_size as usize];
+        image[start..start + contents.len()].copy_from_slice(contents);
+        images.push(image);
+    }
+    images
+}
 
-/// Says what in the kernel's layout stops it from being mapped as linked, one
-/// line per problem, or nothing if all is well.
-fn layout_problems(
-    file_type: bismuth_elf::FileType,
-    entry: u64,
-    segments: &[bismuth_elf::Segment],
-) -> Vec<String> {
-    let mut problems = Vec::new();
-    // gABI ch. 4, "ELF Header", `e_type`: only `ET_EXEC` runs at the
-    // addresses it names, with no relocation.
-    if file_type != bismuth_elf::FileType::Executable {
-        problems.push(format!(
-            "the file is {file_type:?}, not a fixed-address executable (ET_EXEC)"
-        ));
+/// The line the boot stage prints after copying the kernel file `bytes`:
+/// the number of segments, their pages, and the 64-bit FNV-1a sum of every
+/// byte of those pages in order.
+fn copied_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
+    let images = page_images(bytes, elf);
+    let mut sum = place::Fnv1a::new();
+    for image in &images {
+        sum.add(image);
     }
-    if entry < KERNEL_BASE {
-        problems.push(format!(
-            "the entry point {entry:#x} is below {KERNEL_BASE:#x}"
-        ));
-    }
-    for (index, segment) in segments.iter().enumerate() {
-        if segment.address < KERNEL_BASE {
-            problems.push(format!(
-                "segment {index} at {:#x} is below {KERNEL_BASE:#x}",
-                segment.address
-            ));
-        }
-        // gABI ch. 5, "Program Loading": a segment is mapped page by page
-        // straight from the file, which needs its address and offset at the
-        // same place in a page.
-        if segment.address % PAGE_SIZE != segment.offset % PAGE_SIZE {
-            problems.push(format!(
-                "segment {index} at {:#x} is at offset {:#x} in the file, a different \
-                 place in its 4 KiB page",
-                segment.address, segment.offset
-            ));
-        }
-    }
-    // Each segment gets its own permissions, so no page may hold two.
-    let pages = |segment: &bismuth_elf::Segment| {
-        let last = segment
-            .address
-            .checked_add(segment.memory_size)?
-            .checked_sub(1)?;
-        (segment.memory_size > 0).then_some((segment.address / PAGE_SIZE, last / PAGE_SIZE))
-    };
-    for (first, a) in segments.iter().enumerate() {
-        for (second, b) in segments.iter().enumerate().skip(first + 1) {
-            if let (Some((a_start, a_end)), Some((b_start, b_end))) = (pages(a), pages(b))
-                && a_start <= b_end
-                && b_start <= a_end
-            {
-                problems.push(format!(
-                    "segments {first} and {second} share the 4 KiB page at {:#x}",
-                    a_start.max(b_start) * PAGE_SIZE
-                ));
-            }
-        }
-    }
-    problems
+    let pages: usize = images.iter().map(|image| image.len() / 4096).sum();
+    format!(
+        "BISMUTH KERNEL COPIED segments={} pages={pages} sum={:#x}",
+        images.len(),
+        sum.value()
+    )
+}
+
+/// The offsets in `kernel` of its loadable segments' program headers. gABI
+/// ch. 4, "ELF Header": `e_phoff` is the eight bytes at 32 and `e_phnum` the
+/// two at 56; ch. 5, "Program Header": a header is 56 bytes and starts with
+/// its type, 1 for a loadable segment.
+fn load_headers(kernel: &[u8]) -> Result<Vec<usize>> {
+    let table = u64::from_le_bytes(kernel[32..40].try_into().expect("eight bytes"));
+    let table = usize::try_from(table).map_err(|_| "the kernel's table offset is too large")?;
+    let count = u16::from_le_bytes([kernel[56], kernel[57]]);
+    Ok((0..usize::from(count))
+        .map(|i| table + 56 * i)
+        .filter(|&at| kernel.get(at..at + 4) == Some(&1u32.to_le_bytes()[..]))
+        .collect())
+}
+
+/// Reads the eight-byte little-endian field at `at`.
+fn get_u64(file: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(file[at..at + 8].try_into().expect("eight bytes"))
+}
+
+/// Writes the eight-byte little-endian field at `at`.
+fn set_u64(file: &mut [u8], at: usize, value: u64) {
+    file[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 /// Runs the ELF reader on the kernel file [`build`] produced.
@@ -426,12 +424,19 @@ impl Scenario {
         let line = format!("BISMUTH KERNEL FILE ERROR: {reason}");
         Scenario::new(name, kernel, line, QEMU_FAILURE_EXIT)
     }
+
+    fn place_error(name: &'static str, kernel: &[u8], reason: &str) -> Self {
+        let line = format!("BISMUTH KERNEL PLACE ERROR: {reason}");
+        Scenario::new(name, Some(kernel), line, QEMU_FAILURE_EXIT)
+    }
 }
 
 /// The boot scenarios, built from the real kernel file `kernel`.
 ///
 /// The normal one expects the entry point and loadable segment count that
-/// the ELF reader finds in the same file here, as [`check_kernel`] reports.
+/// the ELF reader finds in the same file here, as [`check_kernel`] reports,
+/// and the sum of the pages [`page_images`] lays out. The last three change
+/// program headers so the file still reads but cannot be placed.
 fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
     let elf = bismuth_elf::Elf::parse(kernel)
         .map_err(|error| format!("the ELF reader rejected the kernel: {error:?}"))?;
@@ -453,8 +458,45 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
     let truncated = kernel
         .get(..cut)
         .ok_or("the kernel is too short to truncate")?;
+    let mut normal = Scenario::new("normal", Some(kernel), ok, QEMU_SUCCESS_EXIT);
+    normal.lines.push(copied_line(kernel, &elf));
+
+    // gABI ch. 4, "ELF Header": `e_entry` is the eight bytes at 24; ch. 5,
+    // "Program Header": `p_vaddr` is at 16 and `p_memsz` at 40 in a header.
+    let loads = load_headers(kernel)?;
+    let (Some(&first), Some(&second), Some(&last)) = (loads.first(), loads.get(1), loads.last())
+    else {
+        return Err("the kernel needs two loadable segments for the boot scenarios".into());
+    };
+    // Moved by a whole number of pages, so the ELF reader's alignment check
+    // still passes.
+    let low = |address: u64| address.wrapping_sub(place::KERNEL_BASE) + 0x20_0000;
+    let mut linked_low = kernel.to_vec();
+    set_u64(&mut linked_low, 24, low(get_u64(kernel, 24)));
+    for &at in &loads {
+        set_u64(&mut linked_low, at + 16, low(get_u64(kernel, at + 16)));
+    }
+    // The second segment moved onto the first one's first page, at the
+    // same place in the page.
+    let mut shared_page = kernel.to_vec();
+    let address = get_u64(kernel, first + 16) & !0xFFF | get_u64(kernel, second + 16) & 0xFFF;
+    set_u64(&mut shared_page, second + 16, address);
+    // The last segment grown to the whole limit on its own.
+    let mut too_large = kernel.to_vec();
+    set_u64(
+        &mut too_large,
+        last + 40,
+        place::PAGE_LIMIT * place::PAGE_SIZE,
+    );
+    let grown = bismuth_elf::Elf::parse(&too_large)
+        .map_err(|error| format!("the ELF reader rejected the grown kernel: {error:?}"))?;
+    let pages: usize = page_images(&too_large, &grown)
+        .iter()
+        .map(|image| image.len() / 4096)
+        .sum();
+
     Ok(vec![
-        Scenario::new("normal", Some(kernel), ok, QEMU_SUCCESS_EXIT),
+        normal,
         Scenario::error("missing", None, "file not found"),
         Scenario::error("empty", Some(&[]), "file is empty"),
         Scenario::error(
@@ -466,6 +508,20 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
             "truncated",
             Some(truncated),
             "ELF reader: ProgramHeadersOutsideFile",
+        ),
+        Scenario::place_error(
+            "linked-low",
+            &linked_low,
+            "entry point below 0xffffffff80000000",
+        ),
+        Scenario::place_error("shared-page", &shared_page, "segments 0 and 1 share a page"),
+        Scenario::place_error(
+            "too-large",
+            &too_large,
+            &format!(
+                "{pages} pages, more than the limit of {}",
+                place::PAGE_LIMIT
+            ),
         ),
     ])
 }
@@ -832,11 +888,9 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KERNEL_BASE, Scenario, boot_failure, describe_kernel, layout_problems, paths_in_markdown,
-        scenarios,
+        Scenario, boot_failure, describe_kernel, page_images, paths_in_markdown, scenarios,
     };
-    use bismuth_elf::FileType::{Executable, SharedObject};
-    use bismuth_elf::{Flags, Segment};
+    use bismuth_elf::place::{Error as PlaceError, KERNEL_BASE, PAGE_LIMIT};
 
     fn missing() -> Scenario {
         Scenario::error("missing", None, "file not found")
@@ -865,16 +919,25 @@ mod tests {
 
     #[test]
     fn the_scenarios_damage_the_kernel_as_named() {
-        let kernel = kernel_file(0b101, KERNEL_BASE + 0x40, 1);
+        let kernel = two_segment_kernel();
         let all = scenarios(&kernel).expect("scenarios");
         let names: Vec<_> = all.iter().map(|s| s.name).collect();
         assert_eq!(
             names,
-            ["normal", "missing", "empty", "bad-signature", "truncated"]
+            [
+                "normal",
+                "missing",
+                "empty",
+                "bad-signature",
+                "truncated",
+                "linked-low",
+                "shared-page",
+                "too-large"
+            ]
         );
         assert_eq!(
             all[0].lines[1],
-            "BISMUTH KERNEL FILE OK entry=0xffffffff80000040 segments=1 bytes=4096"
+            "BISMUTH KERNEL FILE OK entry=0xffffffff80001040 segments=2 bytes=8192"
         );
         assert_eq!(all[0].exit_code, 33);
         assert_eq!(all[1].kernel, None);
@@ -885,6 +948,37 @@ mod tests {
         ] {
             let file = scenario.kernel.as_deref().expect("has a file");
             assert_eq!(bismuth_elf::Elf::parse(file).map(|_| ()), Err(error));
+            assert_eq!(scenario.exit_code, 35);
+        }
+        // The read-only page, plus the code grown to the limit on its own.
+        let pages = 1 + PAGE_LIMIT;
+        for (scenario, error, line) in [
+            (
+                &all[5],
+                PlaceError::EntryBelowBase,
+                "entry point below 0xffffffff80000000".to_string(),
+            ),
+            (
+                &all[6],
+                PlaceError::SharedPage {
+                    first: 0,
+                    second: 1,
+                },
+                "segments 0 and 1 share a page".to_string(),
+            ),
+            (
+                &all[7],
+                PlaceError::TooManyPages { pages },
+                format!("{pages} pages, more than the limit of {PAGE_LIMIT}"),
+            ),
+        ] {
+            let file = scenario.kernel.as_deref().expect("has a file");
+            let elf = bismuth_elf::Elf::parse(file).expect("the ELF reader accepts it");
+            assert_eq!(bismuth_elf::place::place(&elf).map(|_| ()), Err(error));
+            assert_eq!(
+                scenario.lines[1],
+                format!("BISMUTH KERNEL PLACE ERROR: {line}")
+            );
             assert_eq!(scenario.exit_code, 35);
         }
     }
@@ -949,106 +1043,6 @@ mod tests {
         assert_eq!(error, "the ELF reader rejected the kernel: Truncated");
     }
 
-    /// A loadable segment at `address`, read from `offset`, taking `memory`
-    /// bytes, with the kernel linker's 4 KiB alignment.
-    fn segment(address: u64, offset: u64, memory: u64, execute: bool) -> Segment {
-        Segment {
-            offset,
-            file_size: memory,
-            address,
-            memory_size: memory,
-            align: 0x1000,
-            flags: Flags {
-                read: true,
-                write: !execute,
-                execute,
-            },
-        }
-    }
-
-    /// The shape the kernel is linked to: read-only, code and data segments
-    /// on pages of their own, from [`KERNEL_BASE`] up.
-    fn good_layout() -> Vec<Segment> {
-        vec![
-            segment(KERNEL_BASE, 0, 0x274, false),
-            segment(KERNEL_BASE + 0x1280, 0x280, 0x15, true),
-            segment(KERNEL_BASE + 0x2298, 0x298, 0xd68, false),
-        ]
-    }
-
-    #[test]
-    fn the_kernel_layout_passes() {
-        let problems = layout_problems(Executable, KERNEL_BASE + 0x1280, &good_layout());
-        assert!(problems.is_empty(), "{problems:?}");
-    }
-
-    #[test]
-    fn a_position_independent_kernel_fails() {
-        let problems = layout_problems(SharedObject, KERNEL_BASE + 0x1280, &good_layout());
-        assert_eq!(
-            problems,
-            ["the file is SharedObject, not a fixed-address executable (ET_EXEC)"]
-        );
-    }
-
-    #[test]
-    fn a_kernel_entered_below_the_top_2_gib_fails() {
-        let problems = layout_problems(Executable, 0x1280, &good_layout());
-        assert_eq!(
-            problems,
-            ["the entry point 0x1280 is below 0xffffffff80000000"]
-        );
-    }
-
-    #[test]
-    fn a_segment_below_the_top_2_gib_fails() {
-        let mut segments = good_layout();
-        segments[0].address = KERNEL_BASE - 0x1000;
-        let problems = layout_problems(Executable, KERNEL_BASE + 0x1280, &segments);
-        assert_eq!(
-            problems,
-            ["segment 0 at 0xffffffff7ffff000 is below 0xffffffff80000000"]
-        );
-    }
-
-    #[test]
-    fn a_segment_whose_address_and_offset_disagree_fails() {
-        let mut segments = good_layout();
-        segments[1].offset = 0x290;
-        let problems = layout_problems(Executable, KERNEL_BASE + 0x1280, &segments);
-        assert_eq!(
-            problems,
-            [
-                "segment 1 at 0xffffffff80001280 is at offset 0x290 in the file, \
-                 a different place in its 4 KiB page"
-            ]
-        );
-    }
-
-    #[test]
-    fn segments_sharing_a_page_fail() {
-        let mut segments = good_layout();
-        // The code now starts on the read-only segment's last page.
-        segments[1].address = KERNEL_BASE + 0x280;
-        let problems = layout_problems(Executable, KERNEL_BASE + 0x280, &segments);
-        assert_eq!(
-            problems,
-            ["segments 0 and 1 share the 4 KiB page at 0xffffffff80000000"]
-        );
-    }
-
-    #[test]
-    fn segments_ending_and_starting_on_page_edges_do_not_share() {
-        let segments = [
-            segment(KERNEL_BASE, 0, 0x1000, false),
-            segment(KERNEL_BASE + 0x1000, 0x1000, 0x1000, true),
-            // Takes no memory, so no page.
-            segment(KERNEL_BASE + 0x1000, 0x1000, 0, false),
-        ];
-        let problems = layout_problems(Executable, KERNEL_BASE + 0x1000, &segments);
-        assert!(problems.is_empty(), "{problems:?}");
-    }
-
     #[test]
     fn a_kernel_linked_low_fails_the_file_check() {
         // gABI ch. 5, "Program Header": `p_vaddr` is the eight bytes at 16.
@@ -1056,12 +1050,77 @@ mod tests {
         file[80..88].copy_from_slice(&0x20_0000u64.to_le_bytes());
         let error = describe_kernel(&file).expect_err("fails");
         assert!(
-            error.starts_with(
-                "the kernel cannot be mapped as linked:\n  \
-                 the entry point 0x200040 is below 0xffffffff80000000\n  \
-                 segment 0 at 0x200000 is below 0xffffffff80000000\n"
-            ),
+            error.starts_with("the kernel cannot be placed as linked: EntryBelowBase\n"),
             "{error}"
+        );
+        // Entered high but placed low.
+        file[24..32].copy_from_slice(&(KERNEL_BASE + 0x40).to_le_bytes());
+        let error = describe_kernel(&file).expect_err("fails");
+        assert!(
+            error.starts_with("the kernel cannot be placed as linked: BelowBase { segment: 0 }"),
+            "{error}"
+        );
+    }
+
+    /// An 8 KiB kernel file with two loadable segments of one page each, a
+    /// read-only one at [`KERNEL_BASE`] and the code after it, holding the
+    /// whole file. Layouts from the gABI "Program Header" section.
+    fn two_segment_kernel() -> Vec<u8> {
+        let mut file = kernel_file(0b100, KERNEL_BASE + 0x1040, 2);
+        file.resize(0x2000, 0);
+        let mut put =
+            |at: usize, value: u64| file[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        put(120, 0x5_0000_0001); // PT_LOAD, then flags r-x
+        put(128, 0x1000);
+        put(136, KERNEL_BASE + 0x1000);
+        put(152, 0x1000);
+        put(160, 0x1000);
+        put(168, 0x1000);
+        // Something to sum besides the headers.
+        for (i, byte) in file[0x1000..].iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        file
+    }
+
+    #[test]
+    fn the_normal_scenario_expects_the_sum_of_the_file_laid_out_in_pages() {
+        let kernel = two_segment_kernel();
+        let normal = &scenarios(&kernel).expect("scenarios")[0];
+        // Both segments fill their pages straight from the file, so the
+        // pages hold exactly the file.
+        let mut sum = bismuth_elf::place::Fnv1a::new();
+        sum.add(&kernel);
+        assert_eq!(
+            normal.lines[2],
+            format!(
+                "BISMUTH KERNEL COPIED segments=2 pages=2 sum={:#x}",
+                sum.value()
+            )
+        );
+    }
+
+    #[test]
+    fn page_images_start_mid_page_and_are_padded_with_zeros() {
+        let mut file = kernel_file(0b101, KERNEL_BASE + 0x40, 1);
+        // gABI ch. 5, "Program Header": offset, address, file and memory
+        // sizes at 8, 16, 32 and 40 in the header at 64.
+        file[72..80].copy_from_slice(&0x810u64.to_le_bytes());
+        file[80..88].copy_from_slice(&(KERNEL_BASE + 0x810).to_le_bytes());
+        file[96..104].copy_from_slice(&4u64.to_le_bytes());
+        file[104..112].copy_from_slice(&0x1000u64.to_le_bytes());
+        file[0x810..0x814].copy_from_slice(b"BISM");
+        let elf = bismuth_elf::Elf::parse(&file).expect("valid");
+        let images = page_images(&file, &elf);
+        assert_eq!(images.len(), 1);
+        let image = &images[0];
+        assert_eq!(image.len(), 0x2000);
+        assert_eq!(&image[0x810..0x814], b"BISM");
+        assert!(
+            image[..0x810]
+                .iter()
+                .chain(&image[0x814..])
+                .all(|b| *b == 0)
         );
     }
 

@@ -1,5 +1,5 @@
 //! Commands that talk to the code host, GitHub, through its command-line tool
-//! `gh`: reading, commenting on and filing issues, and opening, editing,
+//! `gh`: listing, reading, commenting on and filing issues, and opening, editing,
 //! marking ready and waiting on pull requests.
 //!
 //! Deciding is kept apart from doing: the argument lists, the choice of
@@ -43,6 +43,11 @@ const LOG_TAIL_LINES: usize = 60;
 const CHECKS_JQ: &str = ".[] | [.bucket, .name, .link] | @tsv";
 /// The issue's title and body, then each comment with its author and date.
 const ISSUE_JQ: &str = r#".title + "\n\n" + .body + ([.comments[] | "\n\n--- comment by " + .author.login + ", " + .createdAt + "\n\n" + .body] | join(""))"#;
+/// One line per issue: number and title. `@tsv` writes a tab, newline,
+/// carriage return or backslash in the title as `\t`, `\n`, `\r` or `\\`.
+const LIST_JQ: &str = ".[] | [.number, .title] | @tsv";
+/// More issues than the repository will have open; `gh` stops at 30 without it.
+const LIST_LIMIT: &str = "1000";
 
 /// Returns true if the text credits a tool, by the rule in
 /// `tools/check-attribution.sh`: lower-case it, remove the allowed names,
@@ -116,6 +121,101 @@ fn issue_read_args(number: &str) -> Vec<String> {
     let mut args = strings(&["issue", "view", number]);
     args.extend(strings(&json));
     args
+}
+
+/// The label is joined to its flag, so a label such as `--web` stays a label.
+fn issue_list_args(label: Option<&str>) -> Vec<String> {
+    let mut args = strings(&["issue", "list", "--state", "open", "--limit", LIST_LIMIT]);
+    args.extend(strings(&["--json", "number,title", "--jq", LIST_JQ]));
+    args.extend(label.map(|label| format!("--label={label}")));
+    args
+}
+
+fn label_list_args() -> Vec<String> {
+    let json = ["--json", "name", "--jq", ".[].name"];
+    let mut args = strings(&["label", "list", "--limit", LIST_LIMIT]);
+    args.extend(strings(&json));
+    args
+}
+
+/// What one run of `gh` printed, and whether it succeeded.
+struct Reply {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+/// Reads the lines [`LIST_JQ`] produces as `<number>\t<title>`, escaping any
+/// control character `@tsv` left in the title so it cannot end the line,
+/// move the cursor or clear the screen.
+fn issue_lines(text: &str) -> Result<Vec<String>> {
+    let lines = text.lines().filter(|line| !line.trim().is_empty());
+    lines
+        .map(|line| {
+            let line = line.trim_end_matches('\r');
+            match line.split_once('\t') {
+                Some((number, title)) if crate::is_number(number) => {
+                    let title: String = title
+                        .chars()
+                        .map(|c| {
+                            if c.is_control() {
+                                c.escape_unicode().to_string()
+                            } else {
+                                c.to_string()
+                            }
+                        })
+                        .collect();
+                    Ok(format!("{number}\t{title}"))
+                }
+                _ => Err(format!(
+                    "gh issue list printed an unexpected line: {line:?}"
+                )),
+            }
+        })
+        .collect()
+}
+
+/// The open issues, with `label` if given, one line each. `gh` finds no
+/// issues for a label that does not exist, so an empty list for a label is
+/// checked against the repository's labels, making a misspelt label an error.
+/// An empty label, which gh reads as no filter, and one with a comma, which
+/// it reads as several labels, are refused before gh is called.
+fn list_issues(
+    label: Option<&str>,
+    mut gh: impl FnMut(&[String]) -> Result<Reply>,
+) -> Result<Vec<String>> {
+    match label {
+        Some(label) if label.trim().is_empty() => {
+            return Err("the label is empty; give a label name after --label".into());
+        }
+        Some(label) if label.contains(',') => {
+            return Err(format!(
+                "issue-list takes one label, and {label:?} contains a comma, \
+                 which gh would read as several labels"
+            ));
+        }
+        _ => {}
+    }
+    let reply = gh(&issue_list_args(label))?;
+    if !reply.success {
+        return Err(format!("gh issue list failed: {}", reply.stderr.trim()));
+    }
+    let issues = issue_lines(&reply.stdout)?;
+    if let (true, Some(label)) = (issues.is_empty(), label) {
+        let labels = gh(&label_list_args())?;
+        if !labels.success {
+            return Err(format!("gh label list failed: {}", labels.stderr.trim()));
+        }
+        // GitHub matches labels without regard to case.
+        let mut names = labels
+            .stdout
+            .lines()
+            .map(|name| name.trim_end_matches('\r'));
+        if !names.any(|name| name.eq_ignore_ascii_case(label)) {
+            return Err(format!("the repository has no label named {label:?}"));
+        }
+    }
+    Ok(issues)
 }
 
 // The builders for commands that send text check it first, so a test can
@@ -409,6 +509,32 @@ pub fn issue_read(number: &str) -> Result<()> {
     Gh::new()?.run(&issue_read_args(number))
 }
 
+/// Prints each open issue, with `label` if given, as `<number>\t<title>`.
+/// With none, prints nothing on standard output and says so on standard error.
+pub fn issue_list(label: Option<&str>) -> Result<()> {
+    // Signed in on the first call, so a refused label needs no credential.
+    let mut gh: Option<Gh> = None;
+    let issues = list_issues(label, |args| {
+        if gh.is_none() {
+            gh = Some(Gh::new()?);
+        }
+        let output = gh.as_ref().expect("set above").output(args)?;
+        Ok(Reply {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    })?;
+    if issues.is_empty() {
+        let labelled = label.map(|label| format!(" labelled {label}"));
+        eprintln!("no open issues{}", labelled.unwrap_or_default());
+    }
+    for issue in issues {
+        println!("{issue}");
+    }
+    Ok(())
+}
+
 pub fn issue_comment(number: &str, body_file: &str) -> Result<()> {
     let args = issue_comment_args(number, body_file)?;
     Gh::new()?.run(&args)
@@ -620,6 +746,142 @@ mod tests {
             issue_new_args("chore: x", &body, Some("papercut")).unwrap()[6..],
             ["--label", "papercut"]
         );
+    }
+
+    #[test]
+    fn issue_list_args_ask_for_every_open_issue() {
+        let base = [
+            "issue",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "1000",
+            "--json",
+            "number,title",
+            "--jq",
+            LIST_JQ,
+        ];
+        assert_eq!(issue_list_args(None), base);
+        // Joined to its flag, a label such as `--web` cannot become a flag.
+        assert_eq!(issue_list_args(Some("--web"))[10..], ["--label=--web"]);
+        assert_eq!(
+            label_list_args(),
+            [
+                "label", "list", "--limit", "1000", "--json", "name", "--jq", ".[].name"
+            ]
+        );
+    }
+
+    #[test]
+    fn issue_lines_keep_each_title_on_its_line() {
+        // `@tsv` has already turned tab, newline and backslash into `\t`,
+        // `\n` and `\\`; any other control character is escaped here.
+        let text = "19\tno list\\tcommand\r\n14\tescape \u{1b}[2J and bell \u{7}\n\n";
+        assert_eq!(
+            issue_lines(text).unwrap(),
+            [
+                "19\tno list\\tcommand",
+                "14\tescape \\u{1b}[2J and bell \\u{7}"
+            ]
+        );
+        assert!(issue_lines("not a number\ttitle\n").is_err());
+        assert!(issue_lines("19\n").is_err());
+    }
+
+    /// The argument lists a stand-in `gh` was called with.
+    type Calls = std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>;
+
+    /// A stand-in for `gh`: answers each call with the next reply, and
+    /// records the arguments it was given.
+    fn stand_in(replies: Vec<Reply>) -> (Calls, impl FnMut(&[String]) -> Result<Reply>) {
+        let calls = Calls::default();
+        let seen = calls.clone();
+        let mut replies = replies.into_iter();
+        let gh = move |args: &[String]| {
+            seen.borrow_mut().push(args.to_vec());
+            replies
+                .next()
+                .ok_or_else(|| "gh was called once too often".into())
+        };
+        (calls, gh)
+    }
+
+    fn reply(success: bool, stdout: &str, stderr: &str) -> Reply {
+        Reply {
+            success,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn open_issues_are_listed() {
+        let (calls, gh) = stand_in(vec![reply(true, "19\tlist issues\n7\tx\n", "")]);
+        let issues = list_issues(Some("papercut"), gh).unwrap();
+        assert_eq!(issues, ["19\tlist issues", "7\tx"]);
+        assert_eq!(*calls.borrow(), [issue_list_args(Some("papercut"))]);
+    }
+
+    #[test]
+    fn no_open_issues_is_an_empty_list() {
+        let (calls, gh) = stand_in(vec![reply(true, "", "")]);
+        assert_eq!(list_issues(None, gh).unwrap(), Vec::<String>::new());
+        assert_eq!(calls.borrow().len(), 1);
+        // With a label that exists, in any case, the label list is read too.
+        let (calls, gh) = stand_in(vec![
+            reply(true, "", ""),
+            reply(true, "bug\nPaperCut\n", ""),
+        ]);
+        assert_eq!(
+            list_issues(Some("papercut"), gh).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(calls.borrow()[1], label_list_args());
+    }
+
+    #[test]
+    fn an_unknown_label_is_an_error() {
+        let (_, gh) = stand_in(vec![
+            reply(true, "", ""),
+            reply(true, "bug\npapercut\n", ""),
+        ]);
+        let error = list_issues(Some("papercuts"), gh).unwrap_err();
+        assert!(error.contains("no label named \"papercuts\""), "{error}");
+    }
+
+    #[test]
+    fn an_empty_label_is_refused_before_gh_is_called() {
+        // `--label=` would make gh list every issue.
+        for label in ["", "  \t"] {
+            let (calls, gh) = stand_in(vec![reply(true, "19\tx\n", "")]);
+            let error = list_issues(Some(label), gh).unwrap_err();
+            assert_eq!(error, "the label is empty; give a label name after --label");
+            assert!(calls.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_label_with_a_comma_is_refused_before_gh_is_called() {
+        // gh would split it into several labels.
+        let (calls, gh) = stand_in(vec![reply(true, "19\tx\n", "")]);
+        let error = list_issues(Some("papercut,bug"), gh).unwrap_err();
+        assert_eq!(
+            error,
+            "issue-list takes one label, and \"papercut,bug\" contains a comma, \
+             which gh would read as several labels"
+        );
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_gh_failure_is_an_error_with_its_message() {
+        let (_, gh) = stand_in(vec![reply(false, "", "HTTP 401: Bad credentials\n")]);
+        let error = list_issues(None, gh).unwrap_err();
+        assert_eq!(error, "gh issue list failed: HTTP 401: Bad credentials");
+        let (_, gh) = stand_in(vec![reply(true, "", ""), reply(false, "", "HTTP 403\n")]);
+        let error = list_issues(Some("papercut"), gh).unwrap_err();
+        assert_eq!(error, "gh label list failed: HTTP 403");
     }
 
     #[test]
