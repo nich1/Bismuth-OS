@@ -1,11 +1,12 @@
-//! The line the boot stage prints about the kernel file, built without
-//! allocation.
+//! The lines the boot stage prints about the kernel file and its copy in
+//! memory, built without allocation.
 //!
 //! This file has no firmware or hardware code, so `xtask` also compiles it
 //! on the development machine (with `#[path]`) and `cargo test --package
 //! xtask` runs the tests at the bottom.
 
 use bismuth_elf::Error as ElfError;
+use bismuth_elf::place::{Error as PlaceError, KERNEL_BASE, MAX_SEGMENTS, PAGE_LIMIT};
 
 /// A step of reading the kernel file that goes through the firmware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +57,26 @@ pub enum Failure {
     },
     /// The ELF reader rejected the file.
     Elf(ElfError),
+}
+
+/// Why the kernel could not be copied into memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceFailure {
+    /// The file breaks a placement rule.
+    Rule(PlaceError),
+    /// The firmware refused pages for this segment, with this status.
+    Firmware {
+        /// The segment's number, as the placement rules count.
+        segment: usize,
+        /// The firmware's error status.
+        status: usize,
+    },
+    /// The firmware has no page allocation service, or reported success but
+    /// handed back page zero, for this segment.
+    NoPages {
+        /// The segment's number.
+        segment: usize,
+    },
 }
 
 /// A line of ASCII text in a fixed buffer. Text past the end is dropped.
@@ -172,6 +193,81 @@ pub fn error_line(failure: &Failure) -> Line {
                 line.push(" in program header ")
                     .push_decimal(u64::from(index));
             }
+        }
+    }
+    line
+}
+
+/// `BISMUTH KERNEL COPIED segments=<n> pages=<n> sum=0x<hex>`.
+pub fn copied_line(segments: usize, pages: u64, sum: u64) -> Line {
+    let mut line = Line::new("BISMUTH KERNEL COPIED segments=");
+    line.push_decimal(segments as u64)
+        .push(" pages=")
+        .push_decimal(pages)
+        .push(" sum=")
+        .push_hex(sum);
+    line
+}
+
+/// `BISMUTH KERNEL PLACE ERROR: <short reason>`.
+pub fn place_error_line(failure: &PlaceFailure) -> Line {
+    let mut line = Line::new("BISMUTH KERNEL PLACE ERROR: ");
+    let segment = |line: &mut Line, segment: usize, reason: &str| {
+        line.push("segment ")
+            .push_decimal(segment as u64)
+            .push(reason);
+    };
+    match *failure {
+        PlaceFailure::Firmware { segment, status } => {
+            line.push("no pages for segment ")
+                .push_decimal(segment as u64)
+                .push(": status ")
+                .push_hex(status as u64);
+        }
+        PlaceFailure::NoPages { segment } => {
+            line.push("no pages for segment ")
+                .push_decimal(segment as u64)
+                .push(": no interface");
+        }
+        PlaceFailure::Rule(PlaceError::NotExecutable) => {
+            line.push("not a fixed-address executable");
+        }
+        PlaceFailure::Rule(PlaceError::EntryBelowBase) => {
+            line.push("entry point below ").push_hex(KERNEL_BASE);
+        }
+        PlaceFailure::Rule(PlaceError::BelowBase { segment: s }) => {
+            segment(&mut line, s, " below ");
+            line.push_hex(KERNEL_BASE);
+        }
+        PlaceFailure::Rule(PlaceError::PageOffsetMismatch { segment: s }) => {
+            segment(
+                &mut line,
+                s,
+                " at a different place in its page than in the file",
+            );
+        }
+        PlaceFailure::Rule(PlaceError::MemorySmallerThanFile { segment: s }) => {
+            segment(&mut line, s, " has more bytes in the file than in memory");
+        }
+        PlaceFailure::Rule(PlaceError::PastTheTop { segment: s }) => {
+            segment(&mut line, s, " runs past the end of the address range");
+        }
+        PlaceFailure::Rule(PlaceError::TooManySegments) => {
+            line.push("more than ")
+                .push_decimal(MAX_SEGMENTS as u64)
+                .push(" segments");
+        }
+        PlaceFailure::Rule(PlaceError::SharedPage { first, second }) => {
+            line.push("segments ")
+                .push_decimal(first as u64)
+                .push(" and ")
+                .push_decimal(second as u64)
+                .push(" share a page");
+        }
+        PlaceFailure::Rule(PlaceError::TooManyPages { pages }) => {
+            line.push_decimal(pages)
+                .push(" pages, more than the limit of ")
+                .push_decimal(PAGE_LIMIT);
         }
     }
     line
@@ -308,6 +404,71 @@ mod tests {
         texts.sort();
         texts.dedup();
         assert_eq!(texts.len(), steps.len());
+    }
+
+    #[test]
+    fn the_copied_line_has_the_documented_shape() {
+        assert_eq!(
+            copied_line(2, 3, 0xcbf2_9ce4_8422_2325).as_str(),
+            "BISMUTH KERNEL COPIED segments=2 pages=3 sum=0xcbf29ce484222325"
+        );
+    }
+
+    #[test]
+    fn each_placement_failure_has_its_own_reason() {
+        let prefix = "BISMUTH KERNEL PLACE ERROR: ";
+        let cases = [
+            (PlaceError::NotExecutable, "not a fixed-address executable"),
+            (
+                PlaceError::EntryBelowBase,
+                "entry point below 0xffffffff80000000",
+            ),
+            (
+                PlaceError::BelowBase { segment: 2 },
+                "segment 2 below 0xffffffff80000000",
+            ),
+            (
+                PlaceError::PageOffsetMismatch { segment: 1 },
+                "segment 1 at a different place in its page than in the file",
+            ),
+            (
+                PlaceError::MemorySmallerThanFile { segment: 1 },
+                "segment 1 has more bytes in the file than in memory",
+            ),
+            (
+                PlaceError::PastTheTop { segment: 0 },
+                "segment 0 runs past the end of the address range",
+            ),
+            (PlaceError::TooManySegments, "more than 8 segments"),
+            (
+                PlaceError::SharedPage {
+                    first: 1,
+                    second: 2,
+                },
+                "segments 1 and 2 share a page",
+            ),
+            (
+                PlaceError::TooManyPages { pages: 16385 },
+                "16385 pages, more than the limit of 16384",
+            ),
+        ];
+        for (error, reason) in cases {
+            let line = place_error_line(&PlaceFailure::Rule(error));
+            assert_eq!(line.as_str(), format!("{prefix}{reason}"));
+        }
+        let firmware = PlaceFailure::Firmware {
+            segment: 1,
+            status: 0x8000_0000_0000_0009,
+        };
+        assert_eq!(
+            place_error_line(&firmware).as_str(),
+            format!("{prefix}no pages for segment 1: status 0x8000000000000009")
+        );
+        let none = PlaceFailure::NoPages { segment: 0 };
+        assert_eq!(
+            place_error_line(&none).as_str(),
+            format!("{prefix}no pages for segment 0: no interface")
+        );
     }
 
     #[test]
