@@ -142,7 +142,8 @@ pub fn disable_interrupts() {
 }
 
 /// Turns interrupts off, clears the direction flag, loads the stack pointer
-/// with `stack_top - 8` and jumps to `entry`. Never returns.
+/// with `stack_top - 8`, puts `handoff` in `rdi` and jumps to `entry`.
+/// Never returns.
 ///
 /// The `- 8` makes the stack look as it does on entry to a function that a
 /// `call` reached: System V x86-64 code expects the stack pointer plus 8 to
@@ -150,28 +151,35 @@ pub fn disable_interrupts() {
 /// Calling Sequence"), the 8 being the return address `call` pushed. The
 /// eight bytes at `stack_top - 8` stand where that return address would be.
 ///
+/// `rdi` is the register of a System V function's first argument (psABI
+/// section 3.2.3 "Parameter Passing"), so the kernel's entry stub can leave
+/// it alone and its Rust entry receives the address as its first argument.
+///
 /// The instructions are `CLI`, `CLD`, `LEA` and `JMP` (SDM volume 2A,
 /// "CLI—Clear Interrupt Flag", "CLD—Clear Direction Flag", "LEA—Load
-/// Effective Address" and "JMP—Jump"). `CLI` is allowed in ring 0 whatever the I/O
-/// privilege level. Only the stack pointer, the instruction pointer and the
-/// flags' interrupt and direction bits change; the general-purpose
-/// registers keep whatever values they had, which the kernel may not rely
-/// on, and everything else (privilege level, mode, segments, control
-/// registers, the firmware's interrupt table) stays as it is, as the entry
-/// contract in `docs/boot.md` lists.
+/// Effective Address" and "JMP—Jump"); `rdi` is loaded by the compiler
+/// before them. `CLI` is allowed in ring 0 whatever the I/O privilege
+/// level. Only the stack pointer, `rdi`, the instruction pointer and the
+/// flags' interrupt and direction bits change as the contract says; the
+/// other general-purpose registers keep whatever values they had, which
+/// the kernel may not rely on, and everything else (privilege level, mode,
+/// segments, control registers, the firmware's interrupt table) stays as
+/// it is, as the entry contract in `docs/boot.md` lists.
 ///
 /// # Safety
 ///
 /// The address tables in CR3 must map `entry` as executable code that
 /// expects to be entered this way and never returns, and must map the
 /// whole stack below `stack_top` read and write, with `stack_top` a
-/// multiple of 16. Nothing of this program's may be used again after the
-/// jump: whatever it still borrows, the kernel may change.
-pub unsafe fn enter_kernel(entry: u64, stack_top: u64) -> ! {
-    // SAFETY: the caller vouches for the code at `entry` and the stack.
-    // Nothing is pushed: the old stack is left as it is, and the new one is
-    // the kernel's. `noreturn`: the jump does not come back, and the
-    // kernel's entry never returns.
+/// multiple of 16. `handoff` must be where they map the hand-off structure,
+/// written in full, read-only, as the entry contract says. Nothing of this
+/// program's may be used again after the jump: whatever it still borrows,
+/// the kernel may change.
+pub unsafe fn enter_kernel(entry: u64, stack_top: u64, handoff: u64) -> ! {
+    // SAFETY: the caller vouches for the code at `entry`, the stack and the
+    // hand-off window. Nothing is pushed: the old stack is left as it is,
+    // and the new one is the kernel's. `noreturn`: the jump does not come
+    // back, and the kernel's entry never returns.
     unsafe {
         asm!(
             "cli",
@@ -180,6 +188,7 @@ pub unsafe fn enter_kernel(entry: u64, stack_top: u64) -> ! {
             "jmp {entry}",
             top = in(reg) stack_top,
             entry = in(reg) entry,
+            in("rdi") handoff,
             options(noreturn, nostack),
         )
     }
