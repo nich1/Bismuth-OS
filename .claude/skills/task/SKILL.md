@@ -57,9 +57,12 @@ one holds.
    has a row.
 
 8. **Open the pull request.** Use the `open-pr` skill. If step 6 opened a
-   draft, update that one instead of opening another; it is marked ready
-   only now, by that skill's last step.
-   *Check:* the pull request exists and its checks are running.
+   draft, do not open another: push the commits made since then with
+   `git push origin refs/heads/<branch>:refs/heads/<branch>`, then replace the description with
+   `cargo xtask pr-edit`. The draft is marked ready only now, by that
+   skill's last step.
+   *Check:* the pull request exists, its head is the branch's last commit,
+   and its checks are running.
 
 9. **Follow through.** Use the `verify` skill's waiting step. Fix failures
    the change caused.
