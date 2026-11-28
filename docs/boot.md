@@ -185,10 +185,12 @@ relies on all of it, and must not rely on anything not listed.
 - **Memory the kernel must not reuse yet:** the lower levels of the
   tables in CR3 are the firmware's own, shared by the copied top-level
   table, and they live in memory the firmware lent for its boot services
-  (`EfiBootServicesData`), as do, so far as the boot stage knows, its
-  segment descriptor table and interrupt table. Boot services have ended,
-  so that memory is the system's to take back, but the processor still
-  reads all of it.
+  (`EfiBootServicesData`). So does its interrupt table, and the handlers
+  that table points to are in boot-services code (`EfiBootServicesCode`).
+  Its segment descriptor table was found in runtime-services data under
+  QEMU's firmware; another firmware may keep it elsewhere. Boot services
+  have ended, so boot-services code and data are the system's to take
+  back, but the processor still reads all of it.
   The kernel must not reuse it until it runs on tables of its own and has
   loaded descriptor and interrupt tables of its own. The kernel's
   segments, its stack, the frames of the new tables and the memory map's
@@ -217,9 +219,10 @@ relies on all of it, and must not rely on anything not listed.
   use the floating-point and vector registers.
 - **The firmware:** boot services have ended (`ExitBootServices`
   succeeded), so the firmware's console, disk and memory services are
-  gone, and the firmware has cleared the system table's pointers to
-  them. Its runtime services remain, but nothing is passed to the kernel
-  to find them with yet.
+  gone. The specification says the firmware should clear the system
+  table's pointers to them, and QEMU's firmware does, but that is not
+  guaranteed. Its runtime services remain, but nothing is passed to the
+  kernel to find them with yet.
 - **The serial port:** set to 115200 baud, 8 data bits, no parity, one
   stop bit by the boot stage, and written to by it and, until boot
   services ended, by the firmware.
