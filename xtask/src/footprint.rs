@@ -14,7 +14,14 @@ use crate::Result;
 pub const STORED: &str = "snapshots/footprint.txt";
 
 /// The folders whose Rust files are scanned for `unsafe`.
-const SOURCES: &[&str] = &["boot/src", "elf/src", "kernel/src", "paging/src"];
+const SOURCES: &[&str] = &[
+    "boot/src",
+    "elf/src",
+    "frames/src",
+    "handoff/src",
+    "kernel/src",
+    "paging/src",
+];
 
 /// How many `unsafe` items one Rust source file contains.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -574,6 +581,8 @@ mod tests {
         tree.write("boot/src/notes.txt", "unsafe { not rust }");
         tree.write("boot/src/inner/deep.rs", "fn b() { unsafe { c() } }");
         tree.write("elf/src/lib.rs", "fn d() {}");
+        tree.write("frames/src/lib.rs", "unsafe fn i() {}");
+        tree.write("handoff/src/lib.rs", "unsafe fn i() {}");
         tree.write("kernel/src/main.rs", "unsafe fn e() { unsafe { f() } }");
         tree.write("paging/src/lib.rs", "fn g() { unsafe { h() } }");
         tree.write(
@@ -603,6 +612,14 @@ mod tests {
                     UnsafeCounts { blocks: 0, fns: 0 }
                 ),
                 (
+                    "frames/src/lib.rs".to_owned(),
+                    UnsafeCounts { blocks: 0, fns: 1 }
+                ),
+                (
+                    "handoff/src/lib.rs".to_owned(),
+                    UnsafeCounts { blocks: 0, fns: 1 }
+                ),
+                (
                     "kernel/src/main.rs".to_owned(),
                     UnsafeCounts { blocks: 1, fns: 1 }
                 ),
@@ -629,6 +646,8 @@ mod tests {
         let tree = TempTree::new("no-kernel");
         tree.write("boot/src/main.rs", "fn a() {}");
         tree.write("elf/src/lib.rs", "fn b() {}");
+        tree.write("frames/src/lib.rs", "fn c() {}");
+        tree.write("handoff/src/lib.rs", "fn c() {}");
         tree.write("image.efi", "1");
         let error = measure(&tree.0, &tree.0.join("image.efi"))
             .err()
@@ -641,6 +660,8 @@ mod tests {
         let tree = TempTree::new("errors");
         tree.write("boot/src/main.rs", "fn a() {}");
         tree.write("elf/src/lib.rs", "fn b() {}");
+        tree.write("frames/src/lib.rs", "fn e() {}");
+        tree.write("handoff/src/lib.rs", "fn e() {}");
         tree.write("kernel/src/main.rs", "fn c() {}");
         tree.write("paging/src/lib.rs", "fn d() {}");
         let image = tree.0.join("image.efi");
@@ -713,6 +734,8 @@ mod tests {
         tree.write("image.efi", "1");
         tree.write("boot/src/main.rs", "");
         tree.write("elf/src/lib.rs", "");
+        tree.write("frames/src/lib.rs", "");
+        tree.write("handoff/src/lib.rs", "");
         tree.write("kernel/src/main.rs", "");
         tree.write("paging/src/lib.rs", "");
         fs::write(tree.0.join("boot/src/main.rs"), [0xFF]).expect("file is written");
