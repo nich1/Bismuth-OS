@@ -7,6 +7,7 @@
 use std::env;
 use std::fs;
 use std::io::Read;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
@@ -38,6 +39,10 @@ mod handoff;
 #[cfg(test)]
 #[path = "../../kernel/src/entry.rs"]
 mod kernel_entry;
+// And for its fault report and the frame its entry stubs build.
+#[cfg(test)]
+#[path = "../../kernel/src/fault.rs"]
+mod kernel_fault;
 
 const USAGE: &str = "\
 usage: cargo xtask <task>
@@ -94,6 +99,8 @@ const KERNEL_FAILURE_EXIT: i32 = 67;
 const KERNEL_MARKER: &str = "BISMUTH KERNEL OK";
 /// The line the kernel's panic handler prints.
 const KERNEL_PANIC: &str = "BISMUTH KERNEL PANIC";
+/// The line the kernel prints once it has loaded its own tables.
+const TABLES_MARKER: &str = "BISMUTH KERNEL TABLES OK";
 /// How long one boot scenario may take before it is treated as a hang.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Where the boot scenarios' disks are laid out, one folder each.
@@ -490,8 +497,8 @@ fn memory_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
 
 /// A boot of the kernel file `kernel` that gets as far as the jump: the
 /// `FILE OK`, `COPIED`, `PLACED` and console lines, the `FIRMWARE LEFT`
-/// line, then the `JUMP` line, then the kernel's `MEMORY` line and `last`
-/// from the kernel, and QEMU exiting with `exit_code`.
+/// line, then the `JUMP` line, then the kernel's tables line, its `MEMORY`
+/// line and `last` from the kernel, and QEMU exiting with `exit_code`.
 fn started(name: &'static str, kernel: &[u8], last: &str, exit_code: i32) -> Result<Scenario> {
     let elf = bismuth_elf::Elf::parse(kernel)
         .map_err(|error| format!("the ELF reader rejected the {name} kernel: {error:?}"))?;
@@ -508,6 +515,7 @@ fn started(name: &'static str, kernel: &[u8], last: &str, exit_code: i32) -> Res
         CONSOLE_AFTER_SWITCH.to_string(),
         firmware_left_line(),
         jump_line(&elf),
+        TABLES_MARKER.to_string(),
         memory_line(kernel, &elf),
         last.to_string(),
     ]);
@@ -625,6 +633,8 @@ struct Scenario {
     /// The processor model QEMU imitates (its `-cpu` argument), or `None`
     /// for QEMU's default.
     cpu: Option<&'static str>,
+    /// The kernel's fault report the serial output must contain, if any.
+    fault: Option<FaultLine>,
     /// The boot image to put on the disk, or `None` for the one in
     /// `target/esp`.
     boot: Option<PathBuf>,
@@ -639,6 +649,7 @@ impl Scenario {
             absent: Vec::new(),
             exit_code,
             cpu: None,
+            fault: None,
             boot: None,
         }
     }
@@ -734,6 +745,10 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
         last + 16,
         get_u64(kernel, last + 16) | !(place::PAGE_SIZE - 1),
     );
+    // And cut to the bytes it has in the file (`p_filesz`, at 32), so it
+    // still ends inside that page, which the ELF reader requires: the
+    // kernel's writable segment is mostly zeros that take no file space.
+    set_u64(&mut top_page, last + 40, get_u64(kernel, last + 32));
     // The real kernel on a processor without no-execute pages: the
     // `qemu64` model, QEMU's default for this machine, with the feature
     // (CPUID 80000001h, EDX bit 20) taken away.
@@ -804,6 +819,225 @@ fn panic_scenario(panicking: &[u8]) -> Result<Scenario> {
     Ok(scenario)
 }
 
+/// The kernel's report of a processor exception, as a fault scenario
+/// expects it: `BISMUTH KERNEL FAULT vector=<n> <name> error=0x<code>
+/// rip=0x<address> rsp=0x<address>`, and for a page fault ` cr2=0x<address>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FaultLine {
+    /// Everything up to and including the error code, exactly.
+    start: String,
+    /// Where the reported instruction must be, or `None` where the manual
+    /// leaves it undefined (a double fault).
+    rip: Option<Range<u64>>,
+    /// Where the reported stack pointer must be.
+    rsp: Range<u64>,
+    /// Where the address in CR2 must be, for a page fault; `None` means the
+    /// line must have no `cr2`.
+    cr2: Option<Range<u64>>,
+}
+
+/// How every fault report starts.
+const FAULT_MARKER: &str = "BISMUTH KERNEL FAULT ";
+
+impl FaultLine {
+    /// Says why the kernel's fault report `line` is not this one, or `None`
+    /// if it is.
+    fn mismatch(&self, line: &str) -> Option<String> {
+        let Some(rest) = line.strip_prefix(&self.start) else {
+            return Some(format!("{line:?} does not start {:?}", self.start));
+        };
+        let mut wanted = vec![("rip", self.rip.clone()), ("rsp", Some(self.rsp.clone()))];
+        if let Some(cr2) = &self.cr2 {
+            wanted.push(("cr2", Some(cr2.clone())));
+        }
+        let fields: Vec<&str> = rest.split(' ').skip(1).collect();
+        if !rest.starts_with(' ') || fields.len() != wanted.len() {
+            return Some(format!("{line:?} does not have the fields {wanted:x?}"));
+        }
+        for ((name, range), field) in wanted.into_iter().zip(fields) {
+            let value = field
+                .strip_prefix(name)
+                .and_then(|field| field.strip_prefix("=0x"))
+                .and_then(|digits| u64::from_str_radix(digits, 16).ok());
+            match (value, range) {
+                (None, _) => return Some(format!("{field:?} is not {name}=0x<hexadecimal>")),
+                (Some(value), Some(range)) if !range.contains(&value) => {
+                    return Some(format!("{name}={value:#x} is outside {range:#x?}"));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+}
+
+/// One deliberate fault the kernel can be built to make: the kernel feature
+/// that makes it, the scenario's name, and what the report must say.
+struct DeliberateFault {
+    feature: &'static str,
+    vector: u8,
+    name: &'static str,
+    error: u64,
+    /// Where the instruction is: in the code, in the writable data, or
+    /// undefined.
+    rip: Place,
+    /// Where the stack pointer is.
+    rsp: Range<u64>,
+    /// Where the touched address is, for a page fault.
+    cr2: Option<Place>,
+}
+
+/// A part of the kernel's address range a report is checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// The segment that may be run.
+    Code,
+    /// The segment that may only be read.
+    ReadOnly,
+    /// The segment that may be written.
+    Writable,
+    /// The unmapped page below the stack.
+    Guard,
+    /// Anywhere: the manual leaves it undefined.
+    Undefined,
+}
+
+/// The kernel's stack, which the boot stage maps.
+const KERNEL_STACK: Range<u64> = place::STACK_BOTTOM..place::STACK_TOP;
+/// The kernel's stack and its guard page below, where the stack pointer is
+/// when the stack has overflowed.
+const OVERFLOWED_STACK: Range<u64> = place::STACK_GUARD..place::STACK_BOTTOM + place::PAGE_SIZE;
+
+/// The faults the kernel's `fault-*` features make, in the order their
+/// scenarios run. Page-fault error codes are SDM vol. 3A, "Interrupt
+/// 14—Page-Fault Exception (#PF)": bit 0 the page was present, bit 1 a
+/// write, bit 4 an instruction fetch.
+const DELIBERATE_FAULTS: [DeliberateFault; 7] = [
+    DeliberateFault {
+        feature: "fault-divide",
+        vector: 0,
+        name: "#DE",
+        error: 0,
+        rip: Place::Code,
+        rsp: KERNEL_STACK,
+        cr2: None,
+    },
+    DeliberateFault {
+        feature: "fault-invalid-opcode",
+        vector: 6,
+        name: "#UD",
+        error: 0,
+        rip: Place::Code,
+        rsp: KERNEL_STACK,
+        cr2: None,
+    },
+    // A present page, written.
+    DeliberateFault {
+        feature: "fault-write-read-only",
+        vector: 14,
+        name: "#PF",
+        error: 0x3,
+        rip: Place::Code,
+        rsp: KERNEL_STACK,
+        cr2: Some(Place::ReadOnly),
+    },
+    // A present page, fetched from: the instruction is the address itself.
+    DeliberateFault {
+        feature: "fault-run-data",
+        vector: 14,
+        name: "#PF",
+        error: 0x11,
+        rip: Place::Writable,
+        rsp: KERNEL_STACK,
+        cr2: Some(Place::Writable),
+    },
+    // A missing page, read.
+    DeliberateFault {
+        feature: "fault-guard-page",
+        vector: 14,
+        name: "#PF",
+        error: 0,
+        rip: Place::Code,
+        rsp: KERNEL_STACK,
+        cr2: Some(Place::Guard),
+    },
+    // The page fault cannot be delivered on the overflowed stack, so the
+    // processor raises a double fault, on its own stack, with error code 0
+    // and the saved instruction undefined.
+    DeliberateFault {
+        feature: "fault-stack-overflow",
+        vector: 8,
+        name: "#DF",
+        error: 0,
+        rip: Place::Undefined,
+        rsp: OVERFLOWED_STACK,
+        cr2: None,
+    },
+    // `int 255`: the last gate, reached by software, to the default handler.
+    DeliberateFault {
+        feature: "fault-last-vector",
+        vector: 255,
+        name: "interrupt",
+        error: 0,
+        rip: Place::Code,
+        rsp: KERNEL_STACK,
+        cr2: None,
+    },
+];
+
+/// The scenario for the kernel file `kernel`, built with `fault`'s feature:
+/// started like the normal kernel, it loads its tables and reads the
+/// hand-off, then makes the fault and reports it with its own line, and QEMU exits with the kernel's
+/// failure code. The firmware's handler must not run, nor the kernel's
+/// normal end.
+fn fault_scenario(fault: &DeliberateFault, kernel: &[u8]) -> Result<Scenario> {
+    let elf = bismuth_elf::Elf::parse(kernel).map_err(|error| {
+        format!(
+            "the ELF reader rejected the {} kernel: {error:?}",
+            fault.feature
+        )
+    })?;
+    let range = |place: Place| -> Result<Range<u64>> {
+        let wanted = |flags: bismuth_elf::Flags| match place {
+            Place::Code => flags.execute,
+            Place::ReadOnly => !flags.write && !flags.execute,
+            Place::Writable => flags.write,
+            Place::Guard | Place::Undefined => false,
+        };
+        match place {
+            Place::Guard => return Ok(place::STACK_GUARD..place::STACK_BOTTOM),
+            Place::Undefined => return Ok(0..u64::MAX),
+            _ => {}
+        }
+        let mut segments = elf
+            .segments()
+            .filter(|segment| segment.memory_size > 0 && wanted(segment.flags));
+        match (segments.next(), segments.next()) {
+            (Some(segment), None) => Ok(segment.address..segment.address + segment.memory_size),
+            _ => Err(format!(
+                "the {} kernel needs exactly one {place:?} segment",
+                fault.feature
+            )),
+        }
+    };
+    // The lines up to the kernel's `MEMORY` line; `started` adds one more.
+    let mut scenario = started(fault.feature, kernel, "", KERNEL_FAILURE_EXIT)?;
+    scenario.lines.pop();
+    scenario.fault = Some(FaultLine {
+        start: format!(
+            "BISMUTH KERNEL FAULT vector={} {} error={:#x}",
+            fault.vector, fault.name, fault.error
+        ),
+        rip: (fault.rip != Place::Undefined)
+            .then(|| range(fault.rip))
+            .transpose()?,
+        rsp: fault.rsp.clone(),
+        cr2: fault.cr2.map(range).transpose()?,
+    });
+    scenario.absent.push(KERNEL_MARKER.to_string());
+    Ok(scenario)
+}
+
 /// The real kernel file `kernel`, started by the boot image `boot`, built
 /// with the boot stage's `damage-handoff` feature, which damages the hand-off
 /// structure's marker after writing it: the kernel refuses the structure
@@ -830,8 +1064,10 @@ const DAMAGED_BOOT: &str = "target/boot-damaged/BOOTX64.EFI";
 const NO_EXECUTE_CPU: &str = "qemu64,-nx";
 
 /// Builds the boot stage and the kernel with `qemu-exit`, runs every boot
-/// scenario and fails if any did not behave as expected. The last scenario
-/// boots a second kernel file, built to panic as soon as it starts.
+/// scenario and fails if any did not behave as expected. After the
+/// scenarios of the real kernel file come one with a kernel file built to
+/// panic, one with a boot image built to damage the hand-off structure,
+/// and one per deliberate fault, each with a kernel file of its own.
 fn test() -> Result<()> {
     let damaged = root().join(DAMAGED_BOOT);
     copy_file(&build_boot(&["qemu-exit", "damage-handoff"])?, &damaged)?;
@@ -844,6 +1080,13 @@ fn test() -> Result<()> {
     let mut all = scenarios(&kernel)?;
     all.push(panic_scenario(&panicking)?);
     all.push(damaged_handoff_scenario(&kernel, damaged)?);
+    for fault in &DELIBERATE_FAULTS {
+        let file = build_kernel(&["qemu-exit", fault.feature])?;
+        let file = fs::read(&file).map_err(|error| {
+            format!("could not read the {} kernel file: {error}", fault.feature)
+        })?;
+        all.push(fault_scenario(fault, &file)?);
+    }
     let mut failed = Vec::new();
     for scenario in all {
         let started = Instant::now();
@@ -866,6 +1109,12 @@ fn test() -> Result<()> {
         );
         for line in &scenario.lines {
             println!("  {line}");
+        }
+        if scenario.fault.is_some() {
+            let mut lines = serial.lines().map(|line| line.trim_end_matches('\r'));
+            if let Some(line) = lines.find(|line| line.starts_with(FAULT_MARKER)) {
+                println!("  {line}");
+            }
         }
     }
     if failed.is_empty() {
@@ -937,7 +1186,14 @@ fn boot_failure(scenario: &Scenario, status: Option<i32>, serial: &str) -> Optio
     if let Some(line) = all.find(|line| scenario.absent.iter().any(|absent| absent == line)) {
         return Some(format!("serial output contained {line:?}"));
     }
-    None
+    let fault = scenario.fault.as_ref()?;
+    let mut all = serial.lines().map(|line| line.trim_end_matches('\r'));
+    match all.find(|line| line.starts_with(FAULT_MARKER)) {
+        Some(line) => fault.mismatch(line),
+        None => Some(format!(
+            "serial output did not contain a {FAULT_MARKER:?}line"
+        )),
+    }
 }
 
 /// Boots the folder `disk` in QEMU with no window, imitating processor model
@@ -1407,11 +1663,14 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KERNEL_SUCCESS_EXIT, QEMU_SUCCESS_EXIT, Result, Scenario, Step, Stop, boot_failure,
-        damaged_handoff_scenario, describe_kernel, locate_qemu, page_images, panic_scenario,
-        paths_in_markdown, placed_line, run_steps, scenarios,
+        DELIBERATE_FAULTS, FaultLine, KERNEL_SUCCESS_EXIT, QEMU_SUCCESS_EXIT, Result, Scenario,
+        Step, Stop, boot_failure, damaged_handoff_scenario, describe_kernel, fault_scenario,
+        locate_qemu, page_images, panic_scenario, paths_in_markdown, placed_line, run_steps,
+        scenarios,
     };
-    use bismuth_elf::place::{Error as PlaceError, KERNEL_BASE, PAGE_LIMIT};
+    use bismuth_elf::place::{
+        Error as PlaceError, KERNEL_BASE, PAGE_LIMIT, STACK_BOTTOM, STACK_GUARD, STACK_TOP,
+    };
     use std::cell::RefCell;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -1747,24 +2006,26 @@ mod tests {
                     handoff=0xffffffff7ffe0000";
         // The kernel's own: its segments' pages, 16 of stack, 54 of tables.
         for (scenario, kernel) in [(&all[0], 2 + 16 + 54), (&all[8], 4 + 16 + 54)] {
-            assert_eq!(scenario.lines.len(), 9, "{}", scenario.name);
+            assert_eq!(scenario.lines.len(), 10, "{}", scenario.name);
             assert_eq!(scenario.lines[4], "Bismuth kernel addresses checked.");
             assert_eq!(
                 scenario.lines[5],
                 "BISMUTH FIRMWARE LEFT descriptors=[1..=512] usable=[usable:40000..=60000] bs=0"
             );
             assert_eq!(scenario.lines[6], jump);
+            assert_eq!(scenario.lines[7], "BISMUTH KERNEL TABLES OK");
             assert_eq!(
-                scenario.lines[7],
+                scenario.lines[8],
                 format!(
                     "BISMUTH KERNEL MEMORY regions=[16..=256] usable=[=usable] kernel={kernel}"
                 )
             );
-            assert_eq!(scenario.lines[8], "BISMUTH KERNEL OK");
+            assert_eq!(scenario.lines[9], "BISMUTH KERNEL OK");
             assert_eq!(scenario.exit_code, 65);
         }
         // The kernel exits now, so nothing expects the boot stage's success.
         assert!(all.iter().all(|s| s.exit_code != QEMU_SUCCESS_EXIT));
+        assert!(all.iter().all(|s| s.fault.is_none()));
         // Only the scenarios that reach the kernel leave the firmware.
         let leaving: Vec<_> = all
             .iter()
@@ -1774,15 +2035,16 @@ mod tests {
         assert_eq!(leaving, ["normal", "long-segment"]);
         let panic = panic_scenario(&kernel).expect("scenario");
         assert_eq!(panic.name, "kernel-panic");
-        assert_eq!(panic.lines[..8], all[0].lines[..8]);
-        assert_eq!(panic.lines[8], "BISMUTH KERNEL PANIC");
+        assert_eq!(panic.lines[..9], all[0].lines[..9]);
+        assert_eq!(panic.lines[9], "BISMUTH KERNEL PANIC");
         assert_eq!(panic.absent, ["BISMUTH KERNEL OK"]);
         assert_eq!(panic.exit_code, 67);
         let damaged = damaged_handoff_scenario(&kernel, "damaged.efi".into()).expect("scenario");
         assert_eq!(damaged.name, "damaged-handoff");
-        assert_eq!(damaged.lines[..7], all[0].lines[..7]);
+        // The tables are loaded before the hand-off is read.
+        assert_eq!(damaged.lines[..8], all[0].lines[..8]);
         assert_eq!(
-            damaged.lines[7..],
+            damaged.lines[8..],
             ["BISMUTH KERNEL HANDOFF ERROR: the marker is wrong"]
         );
         assert_eq!(damaged.absent, ["BISMUTH KERNEL OK"]);
@@ -1857,6 +2119,178 @@ LEFT u=42
         }
         // An unknown name matches nothing.
         assert!(!super::line_matches("MEMORY u=[=u]", "MEMORY u=42"));
+    }
+
+    /// [`two_segment_kernel`] with a third, writable segment of three
+    /// pages at `KERNEL_BASE + 0x2000`, 16 bytes of them from the file.
+    fn three_segment_kernel() -> Vec<u8> {
+        let mut file = two_segment_kernel();
+        file[56..58].copy_from_slice(&3u16.to_le_bytes());
+        let mut put =
+            |at: usize, value: u64| file[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        put(176, 0x6_0000_0001); // PT_LOAD, then flags rw-
+        put(184, 0x1000);
+        put(192, KERNEL_BASE + 0x2000);
+        put(208, 0x10);
+        put(216, 0x3000);
+        put(224, 0x1000);
+        file
+    }
+
+    #[test]
+    fn each_fault_scenario_expects_the_kernels_report_in_the_right_place() {
+        let kernel = three_segment_kernel();
+        let normal = &scenarios(&kernel).expect("scenarios")[0];
+        let all: Vec<Scenario> = DELIBERATE_FAULTS
+            .iter()
+            .map(|fault| fault_scenario(fault, &kernel).expect("scenario"))
+            .collect();
+        let code = KERNEL_BASE + 0x1000..KERNEL_BASE + 0x2000;
+        let read_only = KERNEL_BASE..KERNEL_BASE + 0x1000;
+        let writable = KERNEL_BASE + 0x2000..KERNEL_BASE + 0x5000;
+        let guard = STACK_GUARD..STACK_BOTTOM;
+        let expected = [
+            ("fault-divide", "vector=0 #DE error=0x0", Some(&code), None),
+            (
+                "fault-invalid-opcode",
+                "vector=6 #UD error=0x0",
+                Some(&code),
+                None,
+            ),
+            (
+                "fault-write-read-only",
+                "vector=14 #PF error=0x3",
+                Some(&code),
+                Some(&read_only),
+            ),
+            (
+                "fault-run-data",
+                "vector=14 #PF error=0x11",
+                Some(&writable),
+                Some(&writable),
+            ),
+            (
+                "fault-guard-page",
+                "vector=14 #PF error=0x0",
+                Some(&code),
+                Some(&guard),
+            ),
+            ("fault-stack-overflow", "vector=8 #DF error=0x0", None, None),
+            (
+                "fault-last-vector",
+                "vector=255 interrupt error=0x0",
+                Some(&code),
+                None,
+            ),
+        ];
+        assert_eq!(all.len(), expected.len());
+        for (scenario, (name, start, rip, cr2)) in all.iter().zip(expected) {
+            assert_eq!(scenario.name, name);
+            assert_eq!(scenario.exit_code, 67, "{name}");
+            // The lines of a normal boot up to the kernel's `MEMORY` line.
+            assert_eq!(scenario.lines[..], normal.lines[..9], "{name}");
+            assert_eq!(scenario.absent, ["BISMUTH KERNEL OK"], "{name}");
+            let fault = scenario.fault.as_ref().expect("a fault");
+            assert_eq!(fault.start, format!("BISMUTH KERNEL FAULT {start}"));
+            assert_eq!(fault.rip.as_ref(), rip, "{name}");
+            assert_eq!(fault.cr2.as_ref(), cr2, "{name}");
+            let rsp = if name == "fault-stack-overflow" {
+                STACK_GUARD..STACK_BOTTOM + 0x1000
+            } else {
+                STACK_BOTTOM..STACK_TOP
+            };
+            assert_eq!(fault.rsp, rsp, "{name}");
+        }
+        // Without a writable segment, the scenario that runs one cannot be
+        // made.
+        let fault = &DELIBERATE_FAULTS[3];
+        assert!(fault_scenario(fault, &two_segment_kernel()).is_err());
+    }
+
+    #[test]
+    fn a_fault_report_must_match_in_every_field() {
+        let fault = FaultLine {
+            start: "BISMUTH KERNEL FAULT vector=14 #PF error=0x3".to_string(),
+            rip: Some(0x1000..0x2000),
+            rsp: 0x8000..0x9000,
+            cr2: Some(0x3000..0x4000),
+        };
+        let good = "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rip=0x1abc rsp=0x8ff0 cr2=0x3001";
+        assert_eq!(fault.mismatch(good), None);
+        for (line, reason) in [
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x2 rip=0x1abc rsp=0x8ff0 cr2=0x3001",
+                "does not start",
+            ),
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x31 rip=0x1abc rsp=0x8ff0 cr2=0x3001",
+                "does not have the fields",
+            ),
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rip=0x2000 rsp=0x8ff0 cr2=0x3001",
+                "rip=0x2000 is outside",
+            ),
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rip=0x1abc rsp=0x7ff0 cr2=0x3001",
+                "rsp=0x7ff0 is outside",
+            ),
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rip=0x1abc rsp=0x8ff0 cr2=0x4000",
+                "cr2=0x4000 is outside",
+            ),
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rip=0x1abc rsp=0x8ff0",
+                "does not have the fields",
+            ),
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rip=0x1abc rsp=0x8ff0 cr2=0x3001 x",
+                "does not have the fields",
+            ),
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rip=0x1abc rsp=0x8ff0 cr2=0xzz",
+                "is not cr2=0x<hexadecimal>",
+            ),
+            (
+                "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rsp=0x8ff0 rip=0x1abc cr2=0x3001",
+                "is not rip=",
+            ),
+        ] {
+            let found = fault.mismatch(line).expect("mismatch");
+            assert!(found.contains(reason), "{line}: {found}");
+        }
+        // A double fault's instruction is not checked, and it has no `cr2`.
+        let double = FaultLine {
+            rip: None,
+            cr2: None,
+            ..fault
+        };
+        let line = "BISMUTH KERNEL FAULT vector=14 #PF error=0x3 rip=0x0 rsp=0x8ff0";
+        assert_eq!(double.mismatch(line), None);
+    }
+
+    #[test]
+    fn a_fault_scenario_fails_without_the_kernels_report() {
+        let kernel = three_segment_kernel();
+        let mut scenario = fault_scenario(&DELIBERATE_FAULTS[0], &kernel).expect("scenario");
+        // Only the report is checked here.
+        scenario.lines.truncate(1);
+        let fault = scenario.fault.clone().expect("a fault");
+        let report = format!(
+            "{} rip={:#x} rsp={:#x}",
+            fault.start,
+            KERNEL_BASE + 0x1800,
+            STACK_TOP - 0x100
+        );
+        let serial = format!("BISMUTH BOOT OK\r\n{report}\r\n");
+        assert_eq!(boot_failure(&scenario, Some(67), &serial), None);
+        let failure = boot_failure(&scenario, Some(67), "BISMUTH BOOT OK\r\n").expect("fails");
+        assert!(failure.contains("did not contain a"), "{failure}");
+        let serial = format!("BISMUTH BOOT OK\r\n{report}\r\nBISMUTH KERNEL OK\r\n");
+        let failure = boot_failure(&scenario, Some(67), &serial).expect("fails");
+        assert!(
+            failure.contains("contained \"BISMUTH KERNEL OK\""),
+            "{failure}"
+        );
     }
 
     #[test]

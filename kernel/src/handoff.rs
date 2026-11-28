@@ -1,6 +1,7 @@
 //! The window the boot stage maps the hand-off structure in, as bytes for
-//! the reader in `bismuth-handoff`, which checks them. The kernel's only
-//! `unsafe` outside `cpu`, `port` and `serial`.
+//! the reader in `bismuth-handoff`, which checks them. Its one `unsafe`
+//! function is the kernel's only step in reading the structure that needs
+//! it.
 
 use bismuth_elf::place::{HANDOFF_ADDRESS, HANDOFF_PAGES, PAGE_SIZE};
 

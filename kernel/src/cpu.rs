@@ -1,5 +1,7 @@
 //! Processor instructions the kernel uses. The kernel's `unsafe` lives
-//! here and in `port` and `serial`.
+//! here, in `port`, `serial` and `handoff`, and in `load`, `takeover`,
+//! `vectors` and `deliberate`, which take the processor's tables over from
+//! the firmware.
 
 use core::arch::{asm, naked_asm};
 
@@ -48,6 +50,63 @@ pub extern "sysv64" fn _start() -> ! {
         "ud2",
         main = sym crate::kernel_main,
     )
+}
+
+/// `CR0.WP`, bit 16: read-only pages refuse writes from ring 0 too (SDM
+/// vol. 3A, chapter "System Architecture Overview", section "Control
+/// Registers").
+pub const CR0_WP: u64 = 1 << 16;
+
+// `MOV` to and from a control register leaves OF, SF, ZF, AF, PF and CF
+// undefined (SDM vol. 2B, "MOV—Move to/from Control Registers"), so these
+// blocks do not promise to keep the flags.
+
+/// Reads CR0.
+pub fn cr0() -> u64 {
+    let value;
+    // SAFETY: reading CR0 is allowed in ring 0 and changes nothing.
+    unsafe { asm!("mov {}, cr0", out(reg) value, options(nomem, nostack)) }
+    value
+}
+
+/// Writes CR0.
+///
+/// # Safety
+///
+/// `value` must be CR0 as it is with only bits the caller understands
+/// changed: the others keep paging, protection and caching as they are.
+pub unsafe fn write_cr0(value: u64) {
+    // SAFETY: the caller vouches for the value. Not `nomem`: a change to
+    // `WP` changes which memory writes succeed.
+    unsafe { asm!("mov cr0, {}", in(reg) value, options(nostack)) }
+}
+
+/// Reads CR2: the address a page fault was raised for, until the next one
+/// (SDM vol. 3A, "Control Registers").
+pub fn cr2() -> u64 {
+    let value;
+    // SAFETY: reading CR2 is allowed in ring 0 and changes nothing.
+    unsafe { asm!("mov {}, cr2", out(reg) value, options(nomem, nostack)) }
+    value
+}
+
+/// The selectors in CS, DS, ES, SS, FS, GS and the task register, in that
+/// order. `MOV` from a segment register and `STR` change no flags (SDM vol.
+/// 2B, "MOV—Move" and "STR—Store Task Register").
+pub fn selectors() -> [u16; 7] {
+    let (cs, ds, es, ss, fs, gs, tr): (u16, u16, u16, u16, u16, u16, u16);
+    // SAFETY: reading the selectors is allowed in any ring and changes
+    // nothing.
+    unsafe {
+        asm!(
+            "mov {0:x}, cs", "mov {1:x}, ds", "mov {2:x}, es", "mov {3:x}, ss",
+            "mov {4:x}, fs", "mov {5:x}, gs", "str {6:x}",
+            out(reg) cs, out(reg) ds, out(reg) es, out(reg) ss,
+            out(reg) fs, out(reg) gs, out(reg) tr,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    [cs, ds, es, ss, fs, gs, tr]
 }
 
 /// Stops the processor for good, waking only to go back to sleep.

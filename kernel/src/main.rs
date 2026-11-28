@@ -3,18 +3,24 @@
 //! The boot stage maps this ELF file at its addresses, gives it a stack and
 //! jumps to its entry point, the stub `cpu::_start`; the state it is entered
 //! in is written down in `docs/boot.md`, "How the kernel is entered". The
-//! kernel checks what of that state it can, reads the hand-off structure
-//! the boot stage left it, prints what it was told and one more line on the
-//! serial port, and stops.
+//! kernel checks what of that state it can, loads its own descriptor tables
+//! in place of the firmware's, reads the hand-off structure the boot stage
+//! left it, prints what it was told and one more line on the serial port,
+//! and stops.
 
 #![no_std]
 #![no_main]
 
 mod cpu;
+mod deliberate;
 mod entry;
+mod fault;
 mod handoff;
+mod load;
 mod port;
 mod serial;
+mod takeover;
+mod vectors;
 
 use core::panic::PanicInfo;
 
@@ -43,6 +49,9 @@ extern "sysv64" fn kernel_main(handoff: u64, stack_pointer: u64, flags: u64) -> 
         serial.write_str("\n");
         stop_failed();
     }
+    // The kernel's own tables first, so that a fault from here on, while
+    // reading the hand-off among the rest, is reported by its own handlers.
+    takeover::run();
     let serial = serial::Com1::init();
     let read = entry::check_handoff(handoff).and_then(|()| {
         // SAFETY: the entry checks passed and the address is the window
@@ -77,6 +86,7 @@ extern "sysv64" fn kernel_main(handoff: u64, stack_pointer: u64, flags: u64) -> 
     if cfg!(feature = "panic-at-entry") {
         panic!("the panic-at-entry test feature is on");
     }
+    deliberate::make_if_asked();
     serial.write_str(KERNEL_MESSAGE);
     #[cfg(feature = "qemu-exit")]
     port::qemu_exit(port::KERNEL_SUCCESS);
