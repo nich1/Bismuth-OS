@@ -8,9 +8,16 @@
 //! format under 4-level paging is in chapter 4 "Paging", section "4-Level
 //! Paging and 5-Level Paging". The register's number is in SDM volume 4,
 //! chapter 2 "Model-Specific Registers (MSRs)", table "IA-32 Architectural
-//! MSRs". The AMD64 Architecture Programmer's Manual volume 2, chapter 3
-//! "System Resources", section "System-Control Registers" describes the
-//! same registers.
+//! MSRs". Whether the processor has no-execute pages is in SDM volume 2A,
+//! chapter 3, the `CPUID` instruction's entry, leaf 80000001H. The AMD64
+//! Architecture Programmer's Manual volume 2, chapter 3 "System Resources",
+//! section "System-Control Registers" describes the same registers, and
+//! its volume 3, appendix E, the same `CPUID` leaf.
+//!
+//! The moves to and from control registers leave the arithmetic flags
+//! undefined (SDM volume 2B, the entry for `MOV` to and from control
+//! registers), so their `asm!` blocks do not promise to keep the flags.
+//! `rdmsr`, `wrmsr` and `cpuid` affect no flags.
 
 use core::arch::asm;
 
@@ -29,13 +36,19 @@ pub const CR3_ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
 pub const EFER_NXE: u64 = 1 << 11;
 /// The number of the `IA32_EFER` model-specific register.
 const IA32_EFER: u32 = 0xC000_0080;
+/// The `CPUID` leaf that says which extended leaves exist, and the one
+/// whose `EDX` bit 20 says whether the processor has no-execute pages
+/// (Intel: "Execute Disable Bit available"; AMD: "NX").
+const EXTENDED_LEAVES: u32 = 0x8000_0000;
+const EXTENDED_FEATURES: u32 = 0x8000_0001;
+const EDX_NO_EXECUTE: u32 = 1 << 20;
 
 /// Reads CR0.
 pub fn cr0() -> u64 {
     let value;
     // SAFETY: reading a control register changes nothing and is allowed in
     // ring 0, where UEFI programs run (as `halt` in `main.rs` relies on).
-    unsafe { asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags)) }
+    unsafe { asm!("mov {}, cr0", out(reg) value, options(nomem, nostack)) }
     value
 }
 
@@ -44,7 +57,7 @@ pub fn cr0() -> u64 {
 pub fn cr3() -> u64 {
     let value;
     // SAFETY: as for `cr0`.
-    unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) }
+    unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack)) }
     value
 }
 
@@ -52,7 +65,7 @@ pub fn cr3() -> u64 {
 pub fn cr4() -> u64 {
     let value;
     // SAFETY: as for `cr0`.
-    unsafe { asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags)) }
+    unsafe { asm!("mov {}, cr4", out(reg) value, options(nomem, nostack)) }
     value
 }
 
@@ -69,17 +82,49 @@ pub fn efer() -> u64 {
     u64::from(high) << 32 | u64::from(low)
 }
 
+/// Whether the processor can forbid running code from a page, so that
+/// [`EFER_NXE`] may be turned on.
+pub fn has_no_execute() -> bool {
+    cpuid(EXTENDED_LEAVES).0 >= EXTENDED_FEATURES
+        && cpuid(EXTENDED_FEATURES).1 & EDX_NO_EXECUTE != 0
+}
+
+/// `EAX` and `EDX` after `CPUID` with `EAX` = `leaf` and `ECX` = 0.
+fn cpuid(leaf: u32) -> (u32, u32) {
+    let (eax, edx);
+    // SAFETY: `cpuid` only reads processor information into four
+    // registers; every x86-64 processor has it, and leaves it does not
+    // have return other values rather than faulting. It also writes
+    // `ebx`, which LLVM reserves and an `asm!` block may not name as an
+    // output, so `rbx` is saved in a free register and put back.
+    unsafe {
+        asm!(
+            "mov {saved}, rbx",
+            "cpuid",
+            "mov rbx, {saved}",
+            saved = out(reg) _,
+            inout("eax") leaf => eax,
+            inout("ecx") 0u32 => _,
+            out("edx") edx,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    (eax, edx)
+}
+
 /// Writes `IA32_EFER`.
 ///
 /// # Safety
 ///
 /// `value` must be what [`efer`] returned with at most [`EFER_NXE`] turned
-/// on. Changing any other bit can leave long mode or fault. Turning
-/// `EFER_NXE` on is harmless only while no table entry in use has bit 63
-/// set, which holds while it is off, since such an entry would fault.
+/// on, and that only if [`has_no_execute`] is true: setting a bit the
+/// processor does not support faults. Changing any other bit can leave
+/// long mode or fault. Turning `EFER_NXE` on is harmless only while no
+/// table entry in use has bit 63 set, which holds while it is off, since
+/// such an entry would fault.
 pub unsafe fn set_efer(value: u64) {
     // SAFETY: `wrmsr` writes only the register named in `ecx`; the caller
-    // vouches for the value.
+    // vouches for the value and that the processor supports it.
     unsafe {
         asm!("wrmsr", in("ecx") IA32_EFER, in("eax") value as u32, in("edx") (value >> 32) as u32,
             options(nostack, preserves_flags));
@@ -102,5 +147,5 @@ pub unsafe fn set_cr3(value: u64) {
     // SAFETY: the caller vouches for the tables. Not `nomem`: every memory
     // access after this one goes through the new tables, so none may be
     // moved across it.
-    unsafe { asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) }
+    unsafe { asm!("mov cr3, {}", in(reg) value, options(nostack)) }
 }

@@ -139,6 +139,9 @@ pub unsafe fn firmware_root(address: u64) -> Table {
 /// kernel's copied pages, and keep doing so while the slice is used. Those
 /// pages are initialised and nothing writes to them.
 pub unsafe fn kernel_pages<'a>(address: u64, pages: u64) -> Option<&'a [u8]> {
+    // A guard: for a segment the placement rules accepted, `None` cannot
+    // happen, since no segment may use the last page of the address range
+    // and the segments take at most 16384 pages.
     let size = pages.checked_mul(PAGE_SIZE)?;
     address.checked_add(size)?;
     let size = usize::try_from(size).ok()?;

@@ -104,7 +104,7 @@ pub unsafe extern "efiapi" fn efi_main(
         serial.write_str(line.as_str());
         serial.write_str("\n");
         // A firmware service, called under the new tables.
-        if let Some(console) = &console {
+        if let (Some(console), Ok(_)) = (&console, placed) {
             console.write_str("Bismuth kernel addresses checked.\n");
         }
     }

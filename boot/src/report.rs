@@ -92,6 +92,11 @@ pub enum MapFailure {
     /// The processor uses 5-level paging, which the table builder does not
     /// support.
     FiveLevel,
+    /// The processor cannot forbid running code from a page, which the
+    /// table builder relies on for pages that are not code.
+    NoExecuteUnsupported,
+    /// Turning no-execute on in `IA32_EFER` did not take effect.
+    NoExecuteNotOn,
     /// The firmware already uses the top-level entry the kernel goes under.
     TopEntryUsed,
     /// The firmware refused frames for the tables, with this status, or
@@ -301,6 +306,12 @@ pub fn map_error_line(failure: &MapFailure) -> Line {
         MapFailure::FiveLevel => {
             line.push("5-level paging is on");
         }
+        MapFailure::NoExecuteUnsupported => {
+            line.push("the processor cannot mark pages no-execute");
+        }
+        MapFailure::NoExecuteNotOn => {
+            line.push("no-execute did not turn on");
+        }
         MapFailure::TopEntryUsed => {
             line.push("top-level entry 511 is already used");
         }
@@ -428,6 +439,9 @@ pub fn place_error_line(failure: &PlaceFailure) -> Line {
         }
         PlaceFailure::Rule(PlaceError::PastTheTop { segment: s }) => {
             segment(&mut line, s, " runs past the end of the address range");
+        }
+        PlaceFailure::Rule(PlaceError::LastPage { segment: s }) => {
+            segment(&mut line, s, " uses the last page of the address range");
         }
         PlaceFailure::Rule(PlaceError::TooManySegments) => {
             line.push("more than ")
@@ -619,6 +633,10 @@ mod tests {
                 PlaceError::PastTheTop { segment: 0 },
                 "segment 0 runs past the end of the address range",
             ),
+            (
+                PlaceError::LastPage { segment: 1 },
+                "segment 1 uses the last page of the address range",
+            ),
             (PlaceError::TooManySegments, "more than 8 segments"),
             (
                 PlaceError::SharedPage {
@@ -708,6 +726,11 @@ mod tests {
         let base = KERNEL_BASE;
         let cases = [
             (MapFailure::FiveLevel, "5-level paging is on"),
+            (
+                MapFailure::NoExecuteUnsupported,
+                "the processor cannot mark pages no-execute",
+            ),
+            (MapFailure::NoExecuteNotOn, "no-execute did not turn on"),
             (
                 MapFailure::TopEntryUsed,
                 "top-level entry 511 is already used",

@@ -53,6 +53,9 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
     if cpu::cr4() & cpu::CR4_LA57 != 0 {
         return Err(MapFailure::FiveLevel);
     }
+    if !cpu::has_no_execute() {
+        return Err(MapFailure::NoExecuteUnsupported);
+    }
     let mut frames = Frames::new(boot_services, TABLE_FRAMES)?;
     let root = frames.root();
     let firmware = cpu::cr3();
@@ -68,8 +71,12 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
 
     let efer = cpu::efer();
     if efer & cpu::EFER_NXE == 0 {
-        // SAFETY: only `EFER_NXE` is turned on, while it is off.
+        // SAFETY: only `EFER_NXE` is turned on, while it is off, and the
+        // processor has no-execute pages (checked above).
         unsafe { cpu::set_efer(efer | cpu::EFER_NXE) }
+        if cpu::efer() & cpu::EFER_NXE == 0 {
+            return Err(MapFailure::NoExecuteNotOn);
+        }
     }
     for (segment, loaded) in kernel.segments().enumerate() {
         // At most `PAGE_LIMIT` pages, so this cannot overflow.
@@ -94,8 +101,14 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
     // before, this program and the firmware among it, translates as
     // before. Entry 511 was empty and now leads only to new tables, in
     // frames of their own, mapping the kernel's pages, which nothing runs
-    // from. The frames are loader data, never freed, and nothing but the
-    // processor changes them from here on.
+    // from. The frames are loader data, never freed. From here on the boot
+    // stage does not write them; the processor sets accessed and dirty
+    // bits, and a firmware service may edit tables it finds through CR3:
+    // the lower tables it shares with the firmware's own, and the new
+    // top-level table. Relied on: such edits keep the firmware's own
+    // mappings valid, as they must for the firmware's tables, and leave
+    // entry 511, which the firmware did not use, alone. The walk below
+    // checks the kernel's mappings after any such edits.
     unsafe { cpu::set_cr3(firmware & !cpu::CR3_ADDRESS | root) }
     check(&mut frames, kernel)
 }

@@ -59,15 +59,18 @@ The boot stage then does six things:
    `BISMUTH KERNEL PLACED segments=2 pages=2 sum=0x108120a9f6b1b5b1
    perms=r--,r-x wp=1`: the sum must be the same as in the `COPIED` line,
    `perms` gives each segment's permissions as the tables have them (`r`
-   for read, `w` for write, `x` for execute), and `wp` says whether the
-   firmware has turned on write protection for its own code (`CR0.WP`;
-   the boot stage only reports it). It also prints a line on the
-   firmware's console, to show the firmware still works under the new
-   tables. Anything that goes wrong gets a line starting `BISMUTH KERNEL
-   MAP ERROR:` instead: 5-level paging is on, the top-level entry the
-   kernel goes under is already used, the firmware has no memory for the
-   tables, the table builder refuses a segment, a page is missing or has
-   the wrong frame or permissions, or the bytes read back differ.
+   for read, `w` for write, `x` for execute), and `wp` gives the state
+   the firmware left `CR0.WP` in: whether read-only pages also refuse
+   writes from the most privileged code, which the boot stage and the
+   kernel run as, so the kernel's read-only pages included (the boot
+   stage only reports it). Then it prints a line on the firmware's
+   console, to show the firmware still works under the new tables.
+   Anything that goes wrong gets a line starting `BISMUTH KERNEL MAP
+   ERROR:` instead: 5-level paging is on, the processor cannot mark pages
+   no-execute or did not turn that on, the top-level entry the kernel
+   goes under is already used, the firmware has no memory for the tables,
+   the table builder refuses a segment, a page is missing or has the
+   wrong frame or permissions, or the bytes read back differ.
 6. **Stops.** It puts the processor to sleep in a loop.
 
 Each failure gets its own line, and then the boot stage stops, because it is
@@ -92,9 +95,10 @@ what the page allows: writing, running code, or only reading. The
 processor finds the top-level table through a register called CR3, and
 switching address tables is one write to CR3.
 
-While the firmware runs, its own tables map every physical address to the
-same virtual address (the UEFI specification requires this), and that is
-how the boot stage has been reaching memory so far. The kernel, though, is
+While the firmware runs, its own tables map the memory in its memory map
+(the memory it hands out and its own) at virtual addresses equal to the
+physical ones (the UEFI specification requires this), and that is how the
+boot stage has been reaching memory so far. The kernel, though, is
 linked to run at `0xFFFF_FFFF_8000_0000`, an address the firmware maps to
 nothing. So the boot stage builds new tables:
 
@@ -114,9 +118,10 @@ nothing. So the boot stage builds new tables:
 3. It loads the new top-level table into CR3.
 
 Before mapping it checks that the processor uses 4-level paging, which is
-all the library builds, and turns on the processor's no-execute feature if
-the firmware has not, because the library marks pages that may not run
-code with a bit the processor otherwise treats as an error. The memory for
+all the library builds, and that it can mark pages no-execute, and turns
+that feature on if the firmware has not, because the library marks pages
+that may not run code with a bit the processor otherwise treats as an
+error. The memory for
 the tables comes from the firmware in one block, enough for any kernel the
 placement rules accept; today's kernel needs four tables.
 
@@ -131,7 +136,9 @@ runs at the kernel addresses yet, so it does not show that code there can
 run, or that read-only pages refuse writes: the firmware decides the
 latter for now (`wp=1` means it does). It does not show the kernel is
 ready to start: the firmware still owns the machine, and the tables still
-hold all of its mappings, which the kernel will replace with its own.
+hold all of its mappings, which the kernel will replace with its own. And
+it looks only at the kernel's own pages, so it does not show that nothing
+else is mapped in the kernel's half of the address range.
 
 ### How the file is read
 
@@ -211,8 +218,9 @@ Tests cover this in three ways:
    above `0xFFFF_FFFF_8000_0000`, each segment sits at the same place in a
    page in memory as in the file, no two segments share a 4 KiB page,
    together they take at most 16384 pages (64 MiB, the same as the file
-   limit) in at most 8 segments, and the entry point is inside a segment
-   that may be run.
+   limit) in at most 8 segments, no segment uses the last page of the
+   address range (its end would be 2^64, which the boot stage cannot read
+   back), and the entry point is inside a segment that may be run.
 
 ## How it is tested
 
@@ -232,7 +240,7 @@ QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
    its expected line, and QEMU exits with the expected code within the time
    limit. Anything else fails, and the captured output is shown.
 
-The ten scenarios:
+The twelve scenarios:
 
 | Disk | Expected line | Exit code |
 |---|---|---|
@@ -246,6 +254,8 @@ The ten scenarios:
 | The last segment grown to 64 MiB | `BISMUTH KERNEL PLACE ERROR: ... pages, more than the limit of 16384` | 35 |
 | The last segment grown by two pages the file does not fill | The `FILE OK`, `COPIED` and `PLACED` lines, with the pages and sum the test lays out from this file | 33 |
 | The entry point moved to the start of the read-only segment | `BISMUTH KERNEL PLACE ERROR: entry point not in an executable segment` | 35 |
+| The last segment moved onto the last page of the address range | `BISMUTH KERNEL PLACE ERROR: segment 1 uses the last page of the address range` | 35 |
+| The real kernel file, on a processor without no-execute pages (QEMU's `-cpu qemu64,-nx`) | The `FILE OK` and `COPIED` lines, then `BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute` | 35 |
 
 The `qemu-exit` feature is off in normal builds. On a real PC nothing answers
 at that port, so the write is left out entirely.
@@ -288,4 +298,6 @@ Rights"), and the AMD64 Architecture Programmer's Manual, volume 2,
 chapter 5. The registers in `boot/src/cpu.rs` (CR0, CR3, CR4 and
 `IA32_EFER`) follow the same Intel manual, volume 3A, chapter 2, sections
 "Control Registers" and "Extended Feature Enable Register", and the AMD
-manual, volume 2, chapter 3, section "System-Control Registers".
+manual, volume 2, chapter 3, section "System-Control Registers"; the
+no-execute check reads `CPUID` leaf 80000001H (Intel volume 2A, the
+`CPUID` entry; AMD volume 3, appendix E).

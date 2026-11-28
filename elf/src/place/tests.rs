@@ -184,22 +184,38 @@ fn a_segment_with_no_memory_inside_another_ones_page_takes_no_page() {
 }
 
 #[test]
-fn a_segment_may_end_at_the_top_of_the_address_range_but_not_wrap() {
+fn a_segment_may_not_use_the_last_page_of_the_address_range() {
+    // A slice of the segment's pages would end at 2^64, which the boot
+    // stage cannot read back.
     let top_page = 0u64.wrapping_sub(0x1000);
     let mut segments = [segment(top_page + 0x800, 0x800, 0x800, true)];
-    let placement = place_at(top_page + 0x800, &segments).expect("ends at 2^64");
     assert_eq!(
-        (placement.segments()[0].page, placement.pages()),
-        (top_page, 1)
+        error(top_page + 0x800, &segments),
+        Error::LastPage { segment: 0 }
     );
+    // Wrapping past the top is still its own error.
     segments[0].memory_size = 0x801;
     assert_eq!(
         error(KERNEL_BASE, &segments),
         Error::PastTheTop { segment: 0 }
     );
-    // The very last byte alone.
+    // The very last byte alone, and a segment running into the last page.
     let last = [segment(u64::MAX, 0xFFF, 1, true)];
-    assert_eq!(place_at(u64::MAX, &last).expect("placed").pages(), 1);
+    assert_eq!(error(u64::MAX, &last), Error::LastPage { segment: 0 });
+    let into = [
+        segment(KERNEL_BASE, 0, 0x10, true),
+        segment(top_page - 0x1000, 0, 0x1001, false),
+    ];
+    assert_eq!(error(KERNEL_BASE, &into), Error::LastPage { segment: 1 });
+    // The page below it is fine.
+    let below = [segment(top_page - 0x1000, 0, 0x1000, true)];
+    assert_eq!(
+        place_at(top_page - 0x1000, &below)
+            .expect("placed")
+            .segments()[0]
+            .page,
+        top_page - 0x1000
+    );
 }
 
 /// `count` one-page segments, each on its own page, the first one code.

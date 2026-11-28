@@ -173,7 +173,9 @@ pub fn map(
 /// every entry on the way allows writes, and run only if none has the
 /// execute-disable bit set. Only the present, read/write, page-size,
 /// execute-disable and address bits are read; user-mode and caching bits,
-/// and the accessed and dirty bits the processor sets, are ignored.
+/// and the accessed and dirty bits the processor sets, are ignored. Bit 63
+/// is read as execute-disable, which is what it means to the processor
+/// only while `IA32_EFER.NXE` is on; while it is off the bit is reserved.
 pub fn translate(
     memory: &mut impl PhysicalMemory,
     root: u64,

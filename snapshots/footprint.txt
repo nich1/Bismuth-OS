@@ -1,6 +1,6 @@
-boot image bytes: 105984
+boot image bytes: 106496
 third-party packages: 0
-unsafe blocks in boot/src/cpu.rs: 6
+unsafe blocks in boot/src/cpu.rs: 7
 unsafe blocks in boot/src/load.rs: 0
 unsafe blocks in boot/src/main.rs: 4
 unsafe blocks in boot/src/map.rs: 4

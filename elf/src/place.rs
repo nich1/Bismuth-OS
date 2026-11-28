@@ -19,6 +19,8 @@ pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 pub const PAGE_SIZE: u64 = 4096;
 /// The bits of an address that give its place within a page.
 const IN_PAGE: u64 = PAGE_SIZE - 1;
+/// The last page of the address range, which no segment may use.
+const LAST_PAGE: u64 = !IN_PAGE;
 /// The most pages all segments together may take: 64 MiB, the same as the
 /// largest kernel file the boot stage reads. A kernel needs far less, and a
 /// damaged memory size must not ask the firmware for most of the machine.
@@ -55,6 +57,12 @@ pub enum Error {
     },
     /// A segment's memory runs past the end of the address range.
     PastTheTop {
+        /// The segment's number.
+        segment: usize,
+    },
+    /// A segment's memory uses the last page of the address range, which
+    /// the boot stage cannot read as a block: its end would be 2^64.
+    LastPage {
         /// The segment's number.
         segment: usize,
     },
@@ -186,6 +194,9 @@ pub fn place_segments(
             .address
             .checked_add(last_byte)
             .ok_or(Error::PastTheTop { segment })?;
+        if last & !IN_PAGE == LAST_PAGE {
+            return Err(Error::LastPage { segment });
+        }
         let page = s.address & !IN_PAGE;
         let pages = ((last & !IN_PAGE).saturating_sub(page) / PAGE_SIZE).saturating_add(1);
         let slot = placement
