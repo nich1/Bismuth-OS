@@ -76,6 +76,14 @@ jobs:
       - run: sh tools/check-names.sh
 EOF
 
+expect pass other-tasks-only <<'EOF'
+jobs:
+  build:
+    steps:
+      # Commented out: cargo xtask check
+      - run: cargo xtask build && cargo xtask snapshot
+EOF
+
 expect fail missing <<'EOF'
 jobs:
   boot:
@@ -156,6 +164,74 @@ jobs:
     steps:
       - env: { BISMUTH_REQUIRE_QEMU: 1 }
         run: cargo xtask check
+EOF
+
+# turned-off <name> <setting>: the workflow sets 1 and the step running the
+# check turns it off in a form the rule does not read as an `env:` entry.
+turned_off() {
+    expect fail "$1" <<EOF
+env:
+  BISMUTH_REQUIRE_QEMU: 1
+jobs:
+  boot:
+    steps:
+      - run: cargo xtask check
+$2
+EOF
+}
+turned_off off-quoted-name '        env:
+          "BISMUTH_REQUIRE_QEMU": 0'
+turned_off off-space-before-colon '        env:
+          BISMUTH_REQUIRE_QEMU : 0'
+turned_off off-flow-env '        env: {BISMUTH_REQUIRE_QEMU: 0}'
+turned_off off-alias-env '        env: *off'
+turned_off off-merge-key '        env:
+          <<: {BISMUTH_REQUIRE_QEMU: 0}'
+turned_off off-merge-key-alias '        env:
+          <<: *off'
+
+# Ways of running the check that a literal match for the words misses.
+expect fail two-spaces <<'EOF'
+jobs:
+  boot:
+    steps:
+      - run: cargo  xtask	check
+EOF
+
+expect fail hash-in-quotes <<'EOF'
+jobs:
+  boot:
+    steps:
+      - run: "echo '#'; cargo xtask check"
+EOF
+
+expect fail continued-line <<'EOF'
+jobs:
+  boot:
+    steps:
+      - run: |
+          cargo xtask \
+            check
+EOF
+
+expect fail folded-plain-scalar <<'EOF'
+jobs:
+  boot:
+    steps:
+      - run: cargo xtask
+          check
+EOF
+
+expect fail listens-for-edited-after-a-hash-in-quotes <<'EOF'
+on:
+  pull_request:
+    types: ["#", edited]
+env:
+  BISMUTH_REQUIRE_QEMU: 1
+jobs:
+  boot:
+    steps:
+      - run: cargo xtask check
 EOF
 
 expect fail listens-for-edited <<'EOF'
