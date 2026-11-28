@@ -49,9 +49,9 @@
 //!   most the number of groups plus one word per allocation in all.
 //! - An allocation right after a free examines one word if the group at the
 //!   search position then has a free frame, which is always so when the
-//!   freed frame is in that group or below it. If the freed frame is above,
-//!   the search walks up from the position to the freed frame's group, which
-//!   can be the whole bitmap. So with memory nearly full, frees and
+//!   freed frame is in that group or below it. Otherwise the search walks up
+//!   from the position, at most to the freed frame's group, which can be the
+//!   whole bitmap. So with memory nearly full, frees and
 //!   allocations in turn cost time in proportion to the bitmap's size per
 //!   allocation.
 //! - Freeing is constant time; adding and reserving go over the range
