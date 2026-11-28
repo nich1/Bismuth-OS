@@ -48,11 +48,12 @@ The boot stage then does eight things:
    are and their permissions. Then it reads the pages back and writes
    `BISMUTH KERNEL COPIED segments=2 pages=2 sum=0x108120a9f6b1b5b1` (the
    numbers are an example; the sum changes when the kernel's source, its
-   build settings or the compiler change, but not with the folder or the
-   machine it is built on, see "The kernel file" below): the
-   sum is a 64-bit FNV-1a checksum of every byte of those pages. A broken
-   rule, or the firmware refusing pages, gets a line starting `BISMUTH
-   KERNEL PLACE ERROR:` instead.
+   build settings or the compiler change, but not with the folder it is
+   built in; it can differ between a Windows and a Linux build, whose panic
+   messages write source paths with different separators, see "The kernel
+   file" below): the sum is a 64-bit FNV-1a checksum of every byte of those
+   pages. A broken rule, or the firmware refusing pages, gets a line
+   starting `BISMUTH KERNEL PLACE ERROR:` instead.
 5. **Gives the kernel its addresses and a stack.** It builds new address
    tables that keep everything the firmware had and add each segment at
    its kernel address, with its own permissions, the kernel's stack

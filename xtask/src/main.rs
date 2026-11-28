@@ -339,6 +339,11 @@ fn split_kernel(linked: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     // gABI ch. 4, "Sections": `sh_type` is the four bytes at 4, `sh_offset`
     // the eight at 24, `sh_size` at 32 and `sh_addralign` at 48.
     let mut moved = Vec::new();
+    // The moved sections lie after the loaded contents and, as the linker
+    // writes them, share no bytes, so together they take at most what
+    // follows. A file whose sections take more would make the full file
+    // that many times larger than itself.
+    let (room, mut taken) = (linked.len() - loaded, 0);
     for index in std::iter::once(names).chain((0..sections).filter(|&i| i != names)) {
         let header = table + 64 * index;
         let (offset, size) = (get_u64(&full, header + 24), get_u64(&full, header + 32));
@@ -351,11 +356,19 @@ fn split_kernel(linked: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
                 "section {index} is partly loaded or outside the file"
             ));
         };
+        // `end_in` placed the section inside the file, so `offset` fits.
+        let start = offset as usize;
+        taken += end - start;
+        if taken > room {
+            return Err(format!(
+                "section {index} and the sections moved before it take more bytes than follow the loaded contents"
+            ));
+        }
         let at = full
             .len()
-            .next_multiple_of(get_u64(&full, header + 48).max(1) as usize);
+            .next_multiple_of(section_alignment(index, get_u64(&full, header + 48))?);
         full.resize(at, 0);
-        full.extend_from_slice(&linked[offset as usize..end]);
+        full.extend_from_slice(&linked[start..end]);
         set_u64(&mut full, header + 24, at as u64);
         moved.push(index);
     }
@@ -371,6 +384,32 @@ fn split_kernel(linked: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         lean[header + 4..header + 8].copy_from_slice(&SHT_NOBITS);
     }
     Ok((full, lean))
+}
+
+/// The largest `sh_addralign` [`split_kernel`] accepts for a section it
+/// moves: one page. A moved section is never loaded, so no address it is
+/// read at needs more; the linker gives such sections 1 to 8. A page leaves
+/// room for any linker's choice and keeps the padding before each section
+/// small.
+const MAX_SECTION_ALIGN: u64 = 4096;
+
+/// The alignment section `index` asks for with its `sh_addralign`, `align`.
+/// gABI ch. 4, "Sections": 0 and 1 mean none, and any other value is a
+/// power of two. Refuses other values and ones above [`MAX_SECTION_ALIGN`].
+fn section_alignment(index: usize, align: u64) -> Result<usize> {
+    if align <= 1 {
+        Ok(1)
+    } else if !align.is_power_of_two() {
+        Err(format!(
+            "section {index} has alignment {align:#x}, which is not a power of two"
+        ))
+    } else if align > MAX_SECTION_ALIGN {
+        Err(format!(
+            "section {index} has alignment {align:#x}, more than {MAX_SECTION_ALIGN:#x}"
+        ))
+    } else {
+        Ok(align as usize)
+    }
 }
 
 /// gABI ch. 4, "Sections": the type of a section that takes no space in the
@@ -2302,6 +2341,77 @@ mod tests {
         assert_eq!(
             error,
             "the kernel's section header table is not as the linker writes it"
+        );
+    }
+
+    /// [`linked_kernel_file`] with the debug section's `sh_addralign` (gABI
+    /// ch. 4, "Sections": the eight bytes at 48 of its header) set to
+    /// `align`.
+    fn linked_with_debug_alignment(align: u64) -> Vec<u8> {
+        let mut linked = linked_kernel_file();
+        let header = get_u64(&linked, 40) as usize + 64 * 2;
+        set_u64(&mut linked, header + 48, align);
+        linked
+    }
+
+    #[test]
+    fn a_moved_section_is_placed_at_its_alignment_in_both_files() {
+        // Unaligned, the debug section would follow the names at 0x2172.
+        let (full, lean) = split_kernel(&linked_with_debug_alignment(16)).expect("splits");
+        let unaligned = 0x2150 + LINKED_NAMES.len();
+        assert_eq!(unaligned, 0x2172);
+        assert_eq!(section_at(&full, 2), (1, 0x2180));
+        assert_eq!(section_at(&lean, 2), (8, 0x2180));
+        assert!(full[unaligned..0x2180].iter().all(|&byte| byte == 0));
+        assert_eq!(full.len(), 0x2180 + 0x31);
+        assert!(full[0x2180..].iter().all(|&byte| byte == 0xDB));
+    }
+
+    #[test]
+    fn section_alignments_of_none_and_powers_of_two_are_accepted() {
+        // gABI ch. 4, "Sections": 0 and 1 both mean no alignment.
+        for (align, at) in [(0, 0x2172), (1, 0x2172), (8, 0x2178)] {
+            let (full, _) = split_kernel(&linked_with_debug_alignment(align))
+                .unwrap_or_else(|error| panic!("alignment {align}: {error}"));
+            assert_eq!(section_at(&full, 2), (1, at), "alignment {align}");
+        }
+    }
+
+    #[test]
+    fn a_section_alignment_that_is_too_large_is_refused() {
+        for align in [u64::MAX, 1 << 63, 1 << 40] {
+            let error = split_kernel(&linked_with_debug_alignment(align)).expect_err("refused");
+            let expected = if align.is_power_of_two() {
+                format!("section 2 has alignment {align:#x}, more than 0x1000")
+            } else {
+                format!("section 2 has alignment {align:#x}, which is not a power of two")
+            };
+            assert_eq!(error, expected);
+        }
+    }
+
+    #[test]
+    fn a_section_alignment_that_is_not_a_power_of_two_is_refused() {
+        let error = split_kernel(&linked_with_debug_alignment(3)).expect_err("refused");
+        assert_eq!(
+            error,
+            "section 2 has alignment 0x3, which is not a power of two"
+        );
+    }
+
+    #[test]
+    fn a_kernel_file_whose_moved_sections_share_bytes_is_refused() {
+        // The debug section made to cover everything after the loaded
+        // contents, the names included, which are moved first: together
+        // they take more than follows the loaded contents.
+        let mut linked = linked_kernel_file();
+        let header = get_u64(&linked, 40) as usize + 64 * 2;
+        let rest = linked.len() as u64 - 0x2010;
+        set_u64(&mut linked, header + 32, rest);
+        let error = split_kernel(&linked).expect_err("refused");
+        assert_eq!(
+            error,
+            "section 2 and the sections moved before it take more bytes than follow the loaded contents"
         );
     }
 
