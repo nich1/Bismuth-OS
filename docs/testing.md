@@ -100,12 +100,12 @@ The report is sorted `key: value` lines. Today it holds:
   `unsafe attributes in <file>`, `unsafe extern blocks in <file>` and
   `unsafe impls in <file>`: for each Rust file under `boot/src`,
   `kernel/src`, `acpi/src`, `apic/src`, `descriptors/src`, `elf/src`,
-  `frames/src`, `handoff/src` and `paging/src`, how many `unsafe { ... }`
-  blocks, `unsafe fn` declarations, `#[unsafe(...)]` attributes (such as
-  `#[unsafe(no_mangle)]` and `#[unsafe(naked)]`), `unsafe extern` blocks
-  and `unsafe impl`s it contains. `unsafe` marks code the compiler cannot
-  check for memory safety, so its count is a rough measure of how much code
-  has to be trusted by hand.
+  `frames/src`, `handoff/src`, `paging/src` and `pci/src`, how many
+  `unsafe { ... }` blocks, `unsafe fn` declarations, `#[unsafe(...)]`
+  attributes (such as `#[unsafe(no_mangle)]` and `#[unsafe(naked)]`),
+  `unsafe extern` blocks and `unsafe impl`s it contains. `unsafe` marks code
+  the compiler cannot check for memory safety, so its count is a rough
+  measure of how much code has to be trusted by hand.
 
 `cargo xtask check` builds the image again, makes the report and compares it
 with the stored one before it runs the boot test. If they differ, the check
