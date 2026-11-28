@@ -44,5 +44,9 @@ jobs:
           HEAD_BRANCH: ${{ github.head_ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: sh tools/check-names.sh
-      - name: Check that title edits cannot start the boot test
-        run: sh tools/check-workflows.sh
+      - name: Check the boot test's workflow settings, and test that check
+        # That title edits cannot start the boot test, and that the step
+        # running it sets BISMUTH_REQUIRE_QEMU: 1.
+        run: |
+          sh tools/test-check-workflows.sh
+          sh tools/check-workflows.sh

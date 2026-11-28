@@ -71,7 +71,7 @@ to damage the hand-off structure (kept in target/boot-damaged).
 | Part | Where | What it does |
 |---|---|---|
 | Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands, `issue-list` among them. Its usage text is the list of commands. `test` runs the boot scenarios. Builds the kernel so that the folder leaves no trace in it, and writes its full and lean files. `check` also runs the ELF reader and the placement rules on the kernel file, checks the full and lean files load the same pages, and builds the kernel in a copy of the repository to check it gets the same bytes |
-| Command table check | `xtask/src/command_tables.rs` | A unit test that fails when the command tables in `AGENTS.md` and `README.md` differ from the commands in the usage text |
+| Command table check | `xtask/src/command_tables.rs` | Unit tests that fail when the command tables in `AGENTS.md` and `README.md` differ from the commands in the usage text, when the usage text differs from the commands `main()` accepts, or when a usage line is indented so that it would not be read as a command or a description |
 | Code host commands | `xtask/src/host.rs` | `pr-open`, `pr-edit`, `pr-ready`, `pr-wait`, `issue-list`, `issue-read`, `issue-comment` and `issue-new`, through `gh`. Checks every title and body with the rule in `tools/check-attribution.sh` before sending it |
 | Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, the lean kernel file's size and loaded pages, `unsafe` counts per file and per kind (blocks, `unsafe fn` declarations, `#[unsafe(...)]` attributes, `unsafe extern` blocks, `unsafe impl`s) of the boot stage, the kernel and the libraries, and third-party packages, and compares the report with the stored one |
 | Stored footprint | `snapshots/footprint.txt` | The expected footprint report. `cargo xtask snapshot --update` rewrites it |
@@ -82,7 +82,8 @@ to damage the hand-off structure (kept in target/boot-damaged).
 | Credit check | `tools/check-attribution.sh` | Fails text that credits a tool |
 | Authorship check | `tools/check-history.sh` | Fails commits or pull requests that are not the owner's |
 | Naming check | `tools/check-names.sh` | Fails branch names, commit subjects and titles that do not follow the convention |
-| Workflow check | `tools/check-workflows.sh` | Fails a workflow that runs the boot test and also re-runs on title or description edits, or does not set `BISMUTH_REQUIRE_QEMU: 1` (which makes a missing QEMU a failure) |
+| Workflow check | `tools/check-workflows.sh` | Fails a workflow that runs the boot test and also re-runs on title or description edits, or does not set `BISMUTH_REQUIRE_QEMU: 1` (which makes a missing QEMU a failure) on the step that runs it, its job or the workflow |
+| Workflow check tests | `tools/test-check-workflows.sh` | Runs the workflow check on sample workflow files and on the real ones, and fails on a wrong verdict. The text checks run it |
 | Commit hook | `.githooks/commit-msg` | Runs the credit and naming checks before a commit is made |
 
 ## Documents

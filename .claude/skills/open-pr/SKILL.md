@@ -29,10 +29,10 @@ description: Commit the intended work, push the branch and open a pull request a
 5. **Push and open it:** `cargo xtask pr-open --title <text> --body-file
    <path>`, adding `--draft` if any required verification has not run yet.
    It refuses text that credits a tool, and never pushes `main` or forces.
-   It always opens the pull request against `main` and cannot choose another
-   base. If the task is stacked, say so in the description: name the pull
-   request it is stacked on, whose commits its diff also shows until that
-   one merges.
+   It opens the pull request against `main` unless given `--base <branch>`.
+   If the task is stacked, give it the base branch named in the plan comment,
+   and name the pull request it is stacked on in the description. It refuses
+   a base that does not exist on the code host or is the branch itself.
    *Check:* it printed the pull request's address, and the author is the
    owner.
 
