@@ -1,0 +1,10 @@
+[package]
+name = "bismuth-descriptors"
+description = "Encodes and decodes x86-64 segment table, task state segment and interrupt table entries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

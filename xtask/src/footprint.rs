@@ -16,6 +16,7 @@ pub const STORED: &str = "snapshots/footprint.txt";
 /// The folders whose Rust files are scanned for `unsafe`.
 const SOURCES: &[&str] = &[
     "boot/src",
+    "descriptors/src",
     "elf/src",
     "frames/src",
     "handoff/src",
@@ -580,6 +581,7 @@ mod tests {
         tree.write("boot/src/main.rs", "unsafe fn a() {}");
         tree.write("boot/src/notes.txt", "unsafe { not rust }");
         tree.write("boot/src/inner/deep.rs", "fn b() { unsafe { c() } }");
+        tree.write("descriptors/src/lib.rs", "fn j() { unsafe { k() } }");
         tree.write("elf/src/lib.rs", "fn d() {}");
         tree.write("frames/src/lib.rs", "unsafe fn i() {}");
         tree.write("handoff/src/lib.rs", "unsafe fn i() {}");
@@ -606,6 +608,10 @@ mod tests {
                 (
                     "boot/src/main.rs".to_owned(),
                     UnsafeCounts { blocks: 0, fns: 1 }
+                ),
+                (
+                    "descriptors/src/lib.rs".to_owned(),
+                    UnsafeCounts { blocks: 1, fns: 0 }
                 ),
                 (
                     "elf/src/lib.rs".to_owned(),
@@ -645,6 +651,7 @@ mod tests {
     fn measuring_fails_without_kernel_sources() {
         let tree = TempTree::new("no-kernel");
         tree.write("boot/src/main.rs", "fn a() {}");
+        tree.write("descriptors/src/lib.rs", "fn d() {}");
         tree.write("elf/src/lib.rs", "fn b() {}");
         tree.write("frames/src/lib.rs", "fn c() {}");
         tree.write("handoff/src/lib.rs", "fn c() {}");
@@ -659,6 +666,7 @@ mod tests {
     fn measuring_names_what_failed() {
         let tree = TempTree::new("errors");
         tree.write("boot/src/main.rs", "fn a() {}");
+        tree.write("descriptors/src/lib.rs", "fn f() {}");
         tree.write("elf/src/lib.rs", "fn b() {}");
         tree.write("frames/src/lib.rs", "fn e() {}");
         tree.write("handoff/src/lib.rs", "fn e() {}");
@@ -733,6 +741,7 @@ mod tests {
         tree.write("Cargo.lock", "version = 4\n");
         tree.write("image.efi", "1");
         tree.write("boot/src/main.rs", "");
+        tree.write("descriptors/src/lib.rs", "");
         tree.write("elf/src/lib.rs", "");
         tree.write("frames/src/lib.rs", "");
         tree.write("handoff/src/lib.rs", "");

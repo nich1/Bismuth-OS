@@ -958,6 +958,14 @@ fn check() -> Result<()> {
         cargo_step("format", vec!["fmt", "--all", "--check"]),
         cargo_step("unit tests (xtask)", vec!["test", "--package", "xtask"]),
         cargo_step("lints (xtask)", lints("xtask", &[])),
+        cargo_step(
+            "unit tests (descriptors)",
+            vec!["test", "--package", "bismuth-descriptors"],
+        ),
+        cargo_step(
+            "lints (descriptors)",
+            lints("bismuth-descriptors", &["--all-targets"]),
+        ),
         cargo_step("unit tests (elf)", vec!["test", "--package", "bismuth-elf"]),
         cargo_step("lints (elf)", lints("bismuth-elf", &["--all-targets"])),
         cargo_step(
