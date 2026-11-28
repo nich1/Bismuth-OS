@@ -94,7 +94,9 @@ needs what the one before it set up:
    code segment, since nothing in the kernel reloads CS.
 8. **Write protection.** The kernel sets `CR0.WP` (below) and reads it back.
 
-Then it prints `BISMUTH KERNEL TABLES OK`. If anything is wrong it prints
+Then it prints `BISMUTH KERNEL TABLES OK` and goes on to read the
+hand-off structure the boot stage left it, so that a fault while reading
+it is reported by the kernel's own handlers. If anything is wrong it prints
 `BISMUTH KERNEL TABLES ERROR:` and the reason instead, for example the
 selectors it read back, and stops with the kernel's failure code.
 
@@ -206,8 +208,9 @@ makes the read-only pages refuse the kernel.
 
 The boot test builds one more kernel file per deliberate fault, each with
 one of the kernel's `fault-*` features (`kernel/src/deliberate.rs`). Each
-boots like the normal kernel up to `BISMUTH KERNEL TABLES OK`, then makes
-its fault, and must print the kernel's own `FAULT` line, never `BISMUTH
+boots like the normal kernel up to `BISMUTH KERNEL TABLES OK` and then,
+on its own tables, reads the hand-off structure and prints its `MEMORY`
+line (`docs/boot.md`), then makes its fault, and must print the kernel's own `FAULT` line, never `BISMUTH
 KERNEL OK`, and exit with 67. The line's vector, name and error code must be
 exact; RIP, RSP and CR2 must lie in the ranges given, worked out from the
 same kernel file. "Code", "read-only" and "writable" are the kernel's

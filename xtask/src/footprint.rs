@@ -15,6 +15,8 @@ pub const STORED: &str = "snapshots/footprint.txt";
 
 /// The folders whose Rust files are scanned for `unsafe`.
 const SOURCES: &[&str] = &[
+    "acpi/src",
+    "apic/src",
     "boot/src",
     "descriptors/src",
     "elf/src",
@@ -578,6 +580,8 @@ mod tests {
     #[test]
     fn measures_nested_files_with_forward_slash_names() {
         let tree = TempTree::new("measure");
+        tree.write("acpi/src/lib.rs", "fn l() { unsafe { m() } }");
+        tree.write("apic/src/lib.rs", "unsafe fn n() { unsafe { o() } }");
         tree.write("boot/src/main.rs", "unsafe fn a() {}");
         tree.write("boot/src/notes.txt", "unsafe { not rust }");
         tree.write("boot/src/inner/deep.rs", "fn b() { unsafe { c() } }");
@@ -601,6 +605,14 @@ mod tests {
         assert_eq!(
             footprint.unsafe_by_file,
             [
+                (
+                    "acpi/src/lib.rs".to_owned(),
+                    UnsafeCounts { blocks: 1, fns: 0 }
+                ),
+                (
+                    "apic/src/lib.rs".to_owned(),
+                    UnsafeCounts { blocks: 1, fns: 1 }
+                ),
                 (
                     "boot/src/inner/deep.rs".to_owned(),
                     UnsafeCounts { blocks: 1, fns: 0 }
@@ -640,6 +652,8 @@ mod tests {
     #[test]
     fn measuring_fails_without_boot_sources() {
         let tree = TempTree::new("missing");
+        tree.write("acpi/src/lib.rs", "fn a() {}");
+        tree.write("apic/src/lib.rs", "fn a() {}");
         tree.write("image.efi", "1");
         let error = measure(&tree.0, &tree.0.join("image.efi"))
             .err()
@@ -650,6 +664,8 @@ mod tests {
     #[test]
     fn measuring_fails_without_kernel_sources() {
         let tree = TempTree::new("no-kernel");
+        tree.write("acpi/src/lib.rs", "fn a() {}");
+        tree.write("apic/src/lib.rs", "fn a() {}");
         tree.write("boot/src/main.rs", "fn a() {}");
         tree.write("descriptors/src/lib.rs", "fn d() {}");
         tree.write("elf/src/lib.rs", "fn b() {}");
@@ -665,6 +681,8 @@ mod tests {
     #[test]
     fn measuring_names_what_failed() {
         let tree = TempTree::new("errors");
+        tree.write("acpi/src/lib.rs", "fn a() {}");
+        tree.write("apic/src/lib.rs", "fn a() {}");
         tree.write("boot/src/main.rs", "fn a() {}");
         tree.write("descriptors/src/lib.rs", "fn f() {}");
         tree.write("elf/src/lib.rs", "fn b() {}");
@@ -740,6 +758,8 @@ mod tests {
         let tree = TempTree::new("bytes");
         tree.write("Cargo.lock", "version = 4\n");
         tree.write("image.efi", "1");
+        tree.write("acpi/src/lib.rs", "");
+        tree.write("apic/src/lib.rs", "");
         tree.write("boot/src/main.rs", "");
         tree.write("descriptors/src/lib.rs", "");
         tree.write("elf/src/lib.rs", "");

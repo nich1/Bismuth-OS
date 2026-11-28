@@ -31,6 +31,10 @@ mod boot_report;
 #[cfg(test)]
 #[path = "../../boot/src/leave.rs"]
 mod leave;
+// The same for building the hand-off structure from the memory map.
+#[cfg(test)]
+#[path = "../../boot/src/handoff.rs"]
+mod handoff;
 // The same for the kernel's checks of the state it was entered in.
 #[cfg(test)]
 #[path = "../../kernel/src/entry.rs"]
@@ -192,23 +196,25 @@ fn run_checked(command: &mut Command, what: &str) -> Result<()> {
 /// QEMU quit with their own exit codes: the boot stage on a failure, the
 /// kernel once it runs.
 fn build(exit_when_done: bool) -> Result<()> {
+    let features: &[&str] = if exit_when_done { &["qemu-exit"] } else { &[] };
+    copy_file(&build_boot(features)?, &boot_image())?;
+    copy_file(&build_kernel(features)?, &kernel_image())
+}
+
+/// Builds the boot stage with `features` and returns where the file is.
+/// Each build replaces the one before it at that place.
+fn build_boot(features: &[&str]) -> Result<PathBuf> {
     let mut command = cargo();
     command.args(["build", "--package", BOOT_PACKAGE, "--target", UEFI_TARGET]);
-    if exit_when_done {
-        command.args(["--features", "qemu-exit"]);
+    if !features.is_empty() {
+        command.args(["--features", &features.join(",")]);
     }
     run_checked(&mut command, "cargo build")?;
-
-    let built = root()
+    Ok(root()
         .join("target")
         .join(UEFI_TARGET)
         .join("debug")
-        .join(format!("{BOOT_PACKAGE}.efi"));
-    let image = boot_image();
-    copy_file(&built, &image)?;
-
-    let features: &[&str] = if exit_when_done { &["qemu-exit"] } else { &[] };
-    copy_file(&build_kernel(features)?, &kernel_image())
+        .join(format!("{BOOT_PACKAGE}.efi")))
 }
 
 /// Builds the kernel with `features` and returns where the file is. Each
@@ -383,20 +389,39 @@ const BIT: &str = "?";
 /// firmware's memory and its device ranges: 3277728 pages there. Stepping
 /// by the specification's 40 bytes instead of the firmware's stride reads
 /// types and page counts from other fields: 8730 pages there.
+///
+/// The usable count is also named `usable`, so that the kernel's line can
+/// be required to report the same number for the same boot. ` bs=0` is the
+/// system table's boot services pointer after the exit, which QEMU's
+/// firmware clears; the specification only says it should, so this is
+/// evidence that `ExitBootServices` ran, for the test only.
 fn firmware_left_line() -> String {
-    "BISMUTH FIRMWARE LEFT descriptors=[1..=512] usable=[40000..=60000]".to_string()
+    "BISMUTH FIRMWARE LEFT descriptors=[1..=512] usable=[usable:40000..=60000] bs=0".to_string()
+}
+
+/// Numbers an expected line has named, for later lines of the same boot.
+type Named = Vec<(String, u64)>;
+
+/// Whether `printed` is the expected line `expected`, with no named
+/// numbers known (see [`line_matches_named`]).
+#[cfg(test)]
+fn line_matches(expected: &str, printed: &str) -> bool {
+    line_matches_named(expected, printed, &mut Named::new())
 }
 
 /// Whether `printed` is the expected line `expected`. An expected line
 /// ending in [`BIT`] matches only `0` or `1` there; a `[<min>..=<max>]` in
-/// one matches a decimal number in that range. Everything else must be the
-/// same.
-fn line_matches(expected: &str, printed: &str) -> bool {
+/// one matches a decimal number in that range, and `[<name>:<min>..=<max>]`
+/// also records the number in `named` under `name` if the whole line
+/// matches; `[=<name>]` matches only the number recorded under `name`.
+/// Everything else must be the same.
+fn line_matches_named(expected: &str, printed: &str, named: &mut Named) -> bool {
     if let Some(start) = expected.strip_suffix(BIT) {
         return printed
             .strip_prefix(start)
             .is_some_and(|rest| rest == "0" || rest == "1");
     }
+    let mut found = Vec::new();
     let (mut expected, mut printed) = (expected, printed);
     while let Some(open) = expected.find('[') {
         let (literal, range) = expected.split_at(open);
@@ -406,36 +431,74 @@ fn line_matches(expected: &str, printed: &str) -> bool {
         let Some((bounds, rest)) = range[1..].split_once(']') else {
             return false;
         };
-        let Some((Ok(min), Ok(max))) = bounds
-            .split_once("..=")
-            .map(|(min, max)| (min.parse::<u64>(), max.parse::<u64>()))
-        else {
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let Ok(value) = after[..digits].parse::<u64>() else {
             return false;
         };
-        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        match after[..digits].parse::<u64>() {
-            Ok(value) if (min..=max).contains(&value) => {}
-            _ => return false,
+        let good = if let Some(name) = bounds.strip_prefix('=') {
+            named
+                .iter()
+                .any(|(known, number)| known == name && *number == value)
+        } else {
+            let (name, bounds) = bounds.split_once(':').unwrap_or(("", bounds));
+            let Some((Ok(min), Ok(max))) = bounds
+                .split_once("..=")
+                .map(|(min, max)| (min.parse::<u64>(), max.parse::<u64>()))
+            else {
+                return false;
+            };
+            if !name.is_empty() {
+                found.push((name.to_string(), value));
+            }
+            (min..=max).contains(&value)
+        };
+        if !good {
+            return false;
         }
         (expected, printed) = (rest, &after[digits..]);
     }
-    printed == expected
+    let matched = printed == expected;
+    if matched {
+        named.extend(found);
+    }
+    matched
 }
 
 /// The line the boot stage prints on the serial port just before it jumps
 /// to the kernel file `elf`'s entry point on the kernel's stack.
 fn jump_line(elf: &bismuth_elf::Elf) -> String {
     format!(
-        "BISMUTH KERNEL JUMP entry={:#x} stack={:#x}",
+        "BISMUTH KERNEL JUMP entry={:#x} stack={:#x} handoff={:#x}",
         elf.entry(),
-        place::STACK_TOP
+        place::STACK_TOP,
+        place::HANDOFF_ADDRESS
+    )
+}
+
+/// The line the kernel prints once it has read the hand-off structure for
+/// the kernel file `bytes`. The regions are a range: the OVMF build this
+/// was written with lists 102 descriptors, which merge to 41 regions; 16
+/// to 256 allows for other builds, while a list merged into a handful of
+/// regions falls outside. The usable pages
+/// must be the boot stage's count for the same boot, made by different
+/// code from the same map. The kernel's own pages are computed here: the
+/// segments' pages as [`page_images`] lays them out, the stack's pages and
+/// the block of table frames.
+fn memory_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
+    let pages: u64 = page_images(bytes, elf)
+        .iter()
+        .map(|image| (image.len() / 4096) as u64)
+        .sum();
+    format!(
+        "BISMUTH KERNEL MEMORY regions=[16..=256] usable=[=usable] kernel={}",
+        pages + place::STACK_PAGES + place::TABLE_FRAMES
     )
 }
 
 /// A boot of the kernel file `kernel` that gets as far as the jump: the
 /// `FILE OK`, `COPIED`, `PLACED` and console lines, the `FIRMWARE LEFT`
-/// line, then the `JUMP` line, then the kernel's tables line and `last`,
-/// and QEMU exiting with `exit_code`.
+/// line, then the `JUMP` line, then the kernel's tables line, its `MEMORY`
+/// line and `last` from the kernel, and QEMU exiting with `exit_code`.
 fn started(name: &'static str, kernel: &[u8], last: &str, exit_code: i32) -> Result<Scenario> {
     let elf = bismuth_elf::Elf::parse(kernel)
         .map_err(|error| format!("the ELF reader rejected the {name} kernel: {error:?}"))?;
@@ -453,6 +516,7 @@ fn started(name: &'static str, kernel: &[u8], last: &str, exit_code: i32) -> Res
         firmware_left_line(),
         jump_line(&elf),
         TABLES_MARKER.to_string(),
+        memory_line(kernel, &elf),
         last.to_string(),
     ]);
     Ok(scenario)
@@ -571,6 +635,9 @@ struct Scenario {
     cpu: Option<&'static str>,
     /// The kernel's fault report the serial output must contain, if any.
     fault: Option<FaultLine>,
+    /// The boot image to put on the disk, or `None` for the one in
+    /// `target/esp`.
+    boot: Option<PathBuf>,
 }
 
 impl Scenario {
@@ -583,6 +650,7 @@ impl Scenario {
             exit_code,
             cpu: None,
             fault: None,
+            boot: None,
         }
     }
 
@@ -918,8 +986,8 @@ const DELIBERATE_FAULTS: [DeliberateFault; 7] = [
 ];
 
 /// The scenario for the kernel file `kernel`, built with `fault`'s feature:
-/// started like the normal kernel, it loads its tables, then makes the
-/// fault and reports it with its own line, and QEMU exits with the kernel's
+/// started like the normal kernel, it loads its tables and reads the
+/// hand-off, then makes the fault and reports it with its own line, and QEMU exits with the kernel's
 /// failure code. The firmware's handler must not run, nor the kernel's
 /// normal end.
 fn fault_scenario(fault: &DeliberateFault, kernel: &[u8]) -> Result<Scenario> {
@@ -952,7 +1020,7 @@ fn fault_scenario(fault: &DeliberateFault, kernel: &[u8]) -> Result<Scenario> {
             )),
         }
     };
-    // The lines up to the kernel's tables line; `started` adds one more.
+    // The lines up to the kernel's `MEMORY` line; `started` adds one more.
     let mut scenario = started(fault.feature, kernel, "", KERNEL_FAILURE_EXIT)?;
     scenario.lines.pop();
     scenario.fault = Some(FaultLine {
@@ -970,13 +1038,39 @@ fn fault_scenario(fault: &DeliberateFault, kernel: &[u8]) -> Result<Scenario> {
     Ok(scenario)
 }
 
+/// The real kernel file `kernel`, started by the boot image `boot`, built
+/// with the boot stage's `damage-handoff` feature, which damages the hand-off
+/// structure's marker after writing it: the kernel refuses the structure
+/// and stops with its failure code.
+fn damaged_handoff_scenario(kernel: &[u8], boot: PathBuf) -> Result<Scenario> {
+    let mut scenario = started(
+        "damaged-handoff",
+        kernel,
+        "BISMUTH KERNEL HANDOFF ERROR: the marker is wrong",
+        KERNEL_FAILURE_EXIT,
+    )?;
+    // The kernel's `MEMORY` line is not printed.
+    scenario.lines.remove(scenario.lines.len() - 2);
+    scenario.absent.push(KERNEL_MARKER.to_string());
+    scenario.boot = Some(boot);
+    Ok(scenario)
+}
+
+/// Where the boot image built with `damage-handoff` is kept for its
+/// scenario.
+const DAMAGED_BOOT: &str = "target/boot-damaged/BOOTX64.EFI";
+
 /// The processor model for the scenario without no-execute pages.
 const NO_EXECUTE_CPU: &str = "qemu64,-nx";
 
 /// Builds the boot stage and the kernel with `qemu-exit`, runs every boot
-/// scenario and fails if any did not behave as expected. The last scenario
-/// boots a second kernel file, built to panic as soon as it starts.
+/// scenario and fails if any did not behave as expected. After the
+/// scenarios of the real kernel file come one with a kernel file built to
+/// panic, one with a boot image built to damage the hand-off structure,
+/// and one per deliberate fault, each with a kernel file of its own.
 fn test() -> Result<()> {
+    let damaged = root().join(DAMAGED_BOOT);
+    copy_file(&build_boot(&["qemu-exit", "damage-handoff"])?, &damaged)?;
     build(true)?;
     let kernel = fs::read(kernel_image())
         .map_err(|error| format!("could not read the kernel file: {error}"))?;
@@ -985,6 +1079,7 @@ fn test() -> Result<()> {
         .map_err(|error| format!("could not read the panicking kernel file: {error}"))?;
     let mut all = scenarios(&kernel)?;
     all.push(panic_scenario(&panicking)?);
+    all.push(damaged_handoff_scenario(&kernel, damaged)?);
     for fault in &DELIBERATE_FAULTS {
         let file = build_kernel(&["qemu-exit", fault.feature])?;
         let file = fs::read(&file).map_err(|error| {
@@ -1039,7 +1134,8 @@ fn scenario_disk(scenario: &Scenario) -> Result<String> {
             .map_err(|error| format!("could not clear {}: {error}", dir.display()))?;
     }
     let efi = dir.join("EFI");
-    copy_file(&boot_image(), &efi.join("BOOT").join("BOOTX64.EFI"))?;
+    let boot = scenario.boot.clone().unwrap_or_else(boot_image);
+    copy_file(&boot, &efi.join("BOOT").join("BOOTX64.EFI"))?;
     if let Some(kernel) = &scenario.kernel {
         let folder = efi.join("BISMUTH");
         fs::create_dir_all(&folder)
@@ -1080,8 +1176,9 @@ fn boot_failure(scenario: &Scenario, status: Option<i32>, serial: &str) -> Optio
         ));
     }
     let mut printed = serial.lines().map(|line| line.trim_end_matches('\r'));
+    let mut named = Named::new();
     for line in &scenario.lines {
-        if !printed.any(|printed| line_matches(line, printed)) {
+        if !printed.any(|printed| line_matches_named(line, printed, &mut named)) {
             return Some(format!("serial output did not contain {line:?} in order"));
         }
     }
@@ -1267,6 +1364,16 @@ fn check() -> Result<()> {
         cargo_step("format", vec!["fmt", "--all", "--check"]),
         cargo_step("unit tests (xtask)", vec!["test", "--package", "xtask"]),
         cargo_step("lints (xtask)", lints("xtask", &[])),
+        cargo_step(
+            "unit tests (acpi)",
+            vec!["test", "--package", "bismuth-acpi"],
+        ),
+        cargo_step("lints (acpi)", lints("bismuth-acpi", &["--all-targets"])),
+        cargo_step(
+            "unit tests (apic)",
+            vec!["test", "--package", "bismuth-apic"],
+        ),
+        cargo_step("lints (apic)", lints("bismuth-apic", &["--all-targets"])),
         cargo_step(
             "unit tests (descriptors)",
             vec!["test", "--package", "bismuth-descriptors"],
@@ -1557,8 +1664,9 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 mod tests {
     use super::{
         DELIBERATE_FAULTS, FaultLine, KERNEL_SUCCESS_EXIT, QEMU_SUCCESS_EXIT, Result, Scenario,
-        Step, Stop, boot_failure, describe_kernel, fault_scenario, locate_qemu, page_images,
-        panic_scenario, paths_in_markdown, placed_line, run_steps, scenarios,
+        Step, Stop, boot_failure, damaged_handoff_scenario, describe_kernel, fault_scenario,
+        locate_qemu, page_images, panic_scenario, paths_in_markdown, placed_line, run_steps,
+        scenarios,
     };
     use bismuth_elf::place::{
         Error as PlaceError, KERNEL_BASE, PAGE_LIMIT, STACK_BOTTOM, STACK_GUARD, STACK_TOP,
@@ -1894,17 +2002,25 @@ mod tests {
     fn the_started_scenarios_expect_the_jump_then_the_kernels_line() {
         let kernel = two_segment_kernel();
         let all = scenarios(&kernel).expect("scenarios");
-        let jump = "BISMUTH KERNEL JUMP entry=0xffffffff80001040 stack=0xffffffff80000000";
-        for scenario in [&all[0], &all[8]] {
-            assert_eq!(scenario.lines.len(), 9, "{}", scenario.name);
+        let jump = "BISMUTH KERNEL JUMP entry=0xffffffff80001040 stack=0xffffffff80000000 \
+                    handoff=0xffffffff7ffe0000";
+        // The kernel's own: its segments' pages, 16 of stack, 54 of tables.
+        for (scenario, kernel) in [(&all[0], 2 + 16 + 54), (&all[8], 4 + 16 + 54)] {
+            assert_eq!(scenario.lines.len(), 10, "{}", scenario.name);
             assert_eq!(scenario.lines[4], "Bismuth kernel addresses checked.");
             assert_eq!(
                 scenario.lines[5],
-                "BISMUTH FIRMWARE LEFT descriptors=[1..=512] usable=[40000..=60000]"
+                "BISMUTH FIRMWARE LEFT descriptors=[1..=512] usable=[usable:40000..=60000] bs=0"
             );
             assert_eq!(scenario.lines[6], jump);
             assert_eq!(scenario.lines[7], "BISMUTH KERNEL TABLES OK");
-            assert_eq!(scenario.lines[8], "BISMUTH KERNEL OK");
+            assert_eq!(
+                scenario.lines[8],
+                format!(
+                    "BISMUTH KERNEL MEMORY regions=[16..=256] usable=[=usable] kernel={kernel}"
+                )
+            );
+            assert_eq!(scenario.lines[9], "BISMUTH KERNEL OK");
             assert_eq!(scenario.exit_code, 65);
         }
         // The kernel exits now, so nothing expects the boot stage's success.
@@ -1919,10 +2035,90 @@ mod tests {
         assert_eq!(leaving, ["normal", "long-segment"]);
         let panic = panic_scenario(&kernel).expect("scenario");
         assert_eq!(panic.name, "kernel-panic");
-        assert_eq!(panic.lines[..8], all[0].lines[..8]);
-        assert_eq!(panic.lines[8], "BISMUTH KERNEL PANIC");
+        assert_eq!(panic.lines[..9], all[0].lines[..9]);
+        assert_eq!(panic.lines[9], "BISMUTH KERNEL PANIC");
         assert_eq!(panic.absent, ["BISMUTH KERNEL OK"]);
         assert_eq!(panic.exit_code, 67);
+        let damaged = damaged_handoff_scenario(&kernel, "damaged.efi".into()).expect("scenario");
+        assert_eq!(damaged.name, "damaged-handoff");
+        // The tables are loaded before the hand-off is read.
+        assert_eq!(damaged.lines[..8], all[0].lines[..8]);
+        assert_eq!(
+            damaged.lines[8..],
+            ["BISMUTH KERNEL HANDOFF ERROR: the marker is wrong"]
+        );
+        assert_eq!(damaged.absent, ["BISMUTH KERNEL OK"]);
+        assert_eq!(damaged.boot.as_deref(), Some(Path::new("damaged.efi")));
+        assert_eq!(damaged.exit_code, 67);
+        // Only it boots another image.
+        assert!(all.iter().all(|s| s.boot.is_none()) && panic.boot.is_none());
+    }
+
+    #[test]
+    fn a_named_number_must_be_the_same_on_a_later_line() {
+        let mut scenario = Scenario::new("named", None, "LEFT u=[u:1..=100]".to_string(), 65);
+        scenario.lines.push("MEMORY u=[=u] k=3".to_string());
+        for (serial, passes) in [
+            (
+                "BISMUTH BOOT OK
+LEFT u=42
+MEMORY u=42 k=3
+",
+                true,
+            ),
+            (
+                "BISMUTH BOOT OK
+LEFT u=42
+MEMORY u=41 k=3
+",
+                false,
+            ),
+            (
+                "BISMUTH BOOT OK
+LEFT u=42
+MEMORY u=420 k=3
+",
+                false,
+            ),
+            (
+                "BISMUTH BOOT OK
+LEFT u=42
+MEMORY u= k=3
+",
+                false,
+            ),
+            (
+                "BISMUTH BOOT OK
+LEFT u=420
+MEMORY u=420 k=3
+",
+                false,
+            ),
+            // A line that fails records nothing.
+            (
+                "BISMUTH BOOT OK
+LEFT u=7 x
+LEFT u=42
+MEMORY u=7 k=3
+",
+                false,
+            ),
+            (
+                "BISMUTH BOOT OK
+MEMORY u=42 k=3
+LEFT u=42
+",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                boot_failure(&scenario, Some(65), serial).is_none(),
+                passes,
+                "{serial}"
+            );
+        }
+        // An unknown name matches nothing.
+        assert!(!super::line_matches("MEMORY u=[=u]", "MEMORY u=42"));
     }
 
     /// [`two_segment_kernel`] with a third, writable segment of three
@@ -1991,8 +2187,8 @@ mod tests {
         for (scenario, (name, start, rip, cr2)) in all.iter().zip(expected) {
             assert_eq!(scenario.name, name);
             assert_eq!(scenario.exit_code, 67, "{name}");
-            // The lines of a normal boot up to the kernel's tables line.
-            assert_eq!(scenario.lines[..], normal.lines[..8], "{name}");
+            // The lines of a normal boot up to the kernel's `MEMORY` line.
+            assert_eq!(scenario.lines[..], normal.lines[..9], "{name}");
             assert_eq!(scenario.absent, ["BISMUTH KERNEL OK"], "{name}");
             let fault = scenario.fault.as_ref().expect("a fault");
             assert_eq!(fault.start, format!("BISMUTH KERNEL FAULT {start}"));

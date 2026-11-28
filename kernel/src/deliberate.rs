@@ -1,8 +1,8 @@
 //! Deliberate faults, for the boot test: with one of the kernel's `fault-*`
-//! features on, the kernel makes that fault once its tables are loaded, and
-//! the test checks the kernel's own report of it. Each one that is about a
-//! page's permissions shows the processor enforcing what the boot stage
-//! mapped. With no such feature on, [`make_if_asked`] does nothing.
+//! features on, the kernel makes that fault once its tables are loaded and
+//! it has read the hand-off structure, and the test checks the kernel's own
+//! report of it. Each one that is about a page's permissions shows the
+//! processor enforcing what the boot stage mapped. With no such feature on, [`make_if_asked`] does nothing.
 //!
 //! Each fault is made by one instruction in an `asm!` block, so what the
 //! processor sees is exactly that instruction. If a fault did not happen,

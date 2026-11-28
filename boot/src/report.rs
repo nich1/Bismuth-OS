@@ -7,10 +7,13 @@
 
 use bismuth_elf::Error as ElfError;
 use bismuth_elf::place::{
-    Error as PlaceError, KERNEL_BASE, MAX_SEGMENTS, PAGE_LIMIT, STACK_BOTTOM,
+    Error as PlaceError, HANDOFF_ADDRESS, HANDOFF_PAGES, KERNEL_BASE, MAX_SEGMENTS, PAGE_LIMIT,
+    PAGE_SIZE, STACK_BOTTOM,
 };
+use bismuth_handoff::BuildError;
 use bismuth_paging::{Error as PagingError, Permissions};
 
+use crate::handoff::HandoffFailure;
 use crate::leave::{DESCRIPTOR_SIZE, ExitFailure};
 
 /// A step of reading the kernel file that goes through the firmware.
@@ -173,6 +176,28 @@ pub enum MapFailure {
     GuardMapped {
         /// The guard page's address.
         address: u64,
+    },
+    /// The firmware refused pages for the hand-off structure, with this
+    /// status, or has no page allocation service.
+    NoHandoffPages {
+        /// The firmware's error status, if it returned one.
+        status: Option<usize>,
+    },
+    /// The table builder refused to map the hand-off window.
+    HandoffMap {
+        /// What the builder returned.
+        error: PagingError,
+    },
+    /// Walking the tables in use found a page of the hand-off window not
+    /// mapped, or mapped to another frame or with other permissions than
+    /// read-only.
+    HandoffWalk {
+        /// The page's kernel address.
+        address: u64,
+        /// The frame and permissions found, if the page is mapped.
+        found: Option<(u64, Permissions)>,
+        /// The frame it should lead to.
+        expected: u64,
     },
 }
 
@@ -423,6 +448,68 @@ pub fn map_error_line(failure: &MapFailure) -> Line {
                 .push_hex(address)
                 .push(" below the stack is mapped");
         }
+        MapFailure::NoHandoffPages { status } => {
+            line.push("no pages for the hand-off structure: ");
+            match status {
+                Some(status) => line.push("status ").push_hex(status as u64),
+                None => line.push("no interface"),
+            };
+        }
+        MapFailure::HandoffMap { error } => {
+            line.push("could not map the hand-off window at ")
+                .push_hex(HANDOFF_ADDRESS)
+                .push(": ");
+            push_paging_error(&mut line, error);
+        }
+        MapFailure::HandoffWalk {
+            address,
+            found,
+            expected,
+        } => {
+            line.push("hand-off page ").push_hex(address).push(" is ");
+            push_found(&mut line, found);
+            line.push(", expected ").push_hex(expected).push(" r--");
+        }
+    }
+    line
+}
+
+/// `BISMUTH HANDOFF ERROR: <plain reason>`: the hand-off structure could
+/// not be built from the memory map.
+pub fn handoff_error_line(failure: &HandoffFailure) -> Line {
+    let mut line = Line::new("BISMUTH HANDOFF ERROR: ");
+    let build = |line: &mut Line, error: BuildError| {
+        match error {
+            BuildError::Unaligned => line.push("does not start on a page"),
+            BuildError::BeyondPhysicalLimit => line.push("ends past 2^52"),
+            BuildError::Overlap => line.push("overlaps another descriptor"),
+            BuildError::Empty => line.push("has no pages"),
+            BuildError::NotLoaderMemory => line.push("is not wholly the boot stage's memory"),
+            BuildError::Full => line.push("does not fit the working space"),
+            BuildError::OutputTooSmall { needed } => line
+                .push("needs ")
+                .push_decimal(needed as u64)
+                .push(" bytes, more than the window's ")
+                .push_decimal(HANDOFF_PAGES * PAGE_SIZE),
+        };
+    };
+    match *failure {
+        HandoffFailure::Descriptor { start, error } => {
+            line.push("the firmware's descriptor at ")
+                .push_hex(start)
+                .push(" ");
+            build(&mut line, error);
+        }
+        HandoffFailure::SetAside { start, error } => {
+            line.push("the kernel's range at ")
+                .push_hex(start)
+                .push(" ");
+            build(&mut line, error);
+        }
+        HandoffFailure::Write(error) => {
+            line.push("the structure ");
+            build(&mut line, error);
+        }
     }
     line
 }
@@ -452,22 +539,32 @@ fn push_found(line: &mut Line, found: Option<(u64, Permissions)>) {
     };
 }
 
-/// `BISMUTH KERNEL JUMP entry=0x<hex> stack=0x<hex>`: where the boot stage
-/// is about to jump, and the top of the stack the kernel starts on.
-pub fn jump_line(entry: u64, stack_top: u64) -> Line {
+/// `BISMUTH KERNEL JUMP entry=0x<hex> stack=0x<hex> handoff=0x<hex>`:
+/// where the boot stage is about to jump, the top of the stack the kernel
+/// starts on, and the hand-off structure's address.
+pub fn jump_line(entry: u64, stack_top: u64, handoff: u64) -> Line {
     let mut line = Line::new("BISMUTH KERNEL JUMP entry=");
-    line.push_hex(entry).push(" stack=").push_hex(stack_top);
+    line.push_hex(entry)
+        .push(" stack=")
+        .push_hex(stack_top)
+        .push(" handoff=")
+        .push_hex(handoff);
     line
 }
 
 /// `BISMUTH FIRMWARE LEFT descriptors=<n> usable=<pages>`: boot services
 /// have ended; the memory map they left has `n` descriptors, and `pages`
-/// 4 KiB pages of it are free for the kernel.
-pub fn firmware_left_line(descriptors: u64, usable: u64) -> Line {
+/// 4 KiB pages of it are free for the kernel. With `boot_services`, the
+/// line ends ` bs=<n>`: the system table's boot services pointer, read
+/// after the exit (the test build only).
+pub fn firmware_left_line(descriptors: u64, usable: u64, boot_services: Option<u64>) -> Line {
     let mut line = Line::new("BISMUTH FIRMWARE LEFT descriptors=");
     line.push_decimal(descriptors)
         .push(" usable=")
         .push_decimal(usable);
+    if let Some(pointer) = boot_services {
+        line.push(" bs=").push_decimal(pointer);
+    }
     line
 }
 
@@ -485,6 +582,12 @@ pub fn exit_error_line(failure: &ExitFailure) -> Line {
         ExitFailure::Allocate(Some(s)) => status(&mut line, "no memory for the memory map", s),
         ExitFailure::Allocate(None) => {
             line.push("no memory for the memory map: no interface");
+        }
+        ExitFailure::Space(Some(s)) => {
+            status(&mut line, "no memory for the hand-off's working space", s)
+        }
+        ExitFailure::Space(None) => {
+            line.push("no memory for the hand-off's working space: no interface");
         }
         ExitFailure::ReadMap(s) => status(&mut line, "reading the memory map", s),
         ExitFailure::MapTooLarge { size, capacity } => {
@@ -957,6 +1060,30 @@ mod tests {
                 },
                 "the guard page 0xffffffff7ffef000 below the stack is mapped",
             ),
+            (
+                MapFailure::NoHandoffPages { status: None },
+                "no pages for the hand-off structure: no interface",
+            ),
+            (
+                MapFailure::HandoffMap {
+                    error: PagingError::OutOfFrames,
+                },
+                "could not map the hand-off window at 0xffffffff7ffe0000: OutOfFrames",
+            ),
+            (
+                MapFailure::HandoffWalk {
+                    address: HANDOFF_ADDRESS,
+                    found: Some((
+                        0xb000,
+                        Permissions {
+                            write: true,
+                            execute: false,
+                        },
+                    )),
+                    expected: 0xb000,
+                },
+                "hand-off page 0xffffffff7ffe0000 is at 0xb000 rw-, expected 0xb000 r--",
+            ),
         ];
         for (failure, reason) in cases {
             assert_eq!(
@@ -991,20 +1118,95 @@ mod tests {
     #[test]
     fn the_jump_line_has_the_documented_shape() {
         assert_eq!(
-            jump_line(0xffff_ffff_8000_1190, 0xffff_ffff_8000_0000).as_str(),
-            "BISMUTH KERNEL JUMP entry=0xffffffff80001190 stack=0xffffffff80000000"
+            jump_line(
+                0xffff_ffff_8000_1190,
+                0xffff_ffff_8000_0000,
+                0xffff_ffff_7ffe_0000
+            )
+            .as_str(),
+            "BISMUTH KERNEL JUMP entry=0xffffffff80001190 stack=0xffffffff80000000 \
+             handoff=0xffffffff7ffe0000"
         );
-        let longest = jump_line(u64::MAX, u64::MAX);
+        let longest = jump_line(u64::MAX, u64::MAX, u64::MAX);
         assert!(longest.as_str().len() < Line::CAPACITY);
     }
 
     #[test]
     fn the_firmware_left_line_has_the_documented_shape() {
         assert_eq!(
-            firmware_left_line(97, 52_313).as_str(),
+            firmware_left_line(97, 52_313, None).as_str(),
             "BISMUTH FIRMWARE LEFT descriptors=97 usable=52313"
         );
-        let longest = firmware_left_line(u64::MAX, u64::MAX);
+        assert_eq!(
+            firmware_left_line(97, 52_313, Some(0)).as_str(),
+            "BISMUTH FIRMWARE LEFT descriptors=97 usable=52313 bs=0"
+        );
+        let longest = firmware_left_line(u64::MAX, u64::MAX, Some(u64::MAX));
+        assert!(longest.as_str().len() < Line::CAPACITY);
+    }
+
+    #[test]
+    fn each_handoff_failure_has_its_own_reason() {
+        let prefix = "BISMUTH HANDOFF ERROR: ";
+        let at = 0x10_0000;
+        let cases = [
+            (
+                HandoffFailure::Descriptor {
+                    start: at,
+                    error: BuildError::Overlap,
+                },
+                "the firmware's descriptor at 0x100000 overlaps another descriptor",
+            ),
+            (
+                HandoffFailure::Descriptor {
+                    start: at + 1,
+                    error: BuildError::Unaligned,
+                },
+                "the firmware's descriptor at 0x100001 does not start on a page",
+            ),
+            (
+                HandoffFailure::Descriptor {
+                    start: at,
+                    error: BuildError::BeyondPhysicalLimit,
+                },
+                "the firmware's descriptor at 0x100000 ends past 2^52",
+            ),
+            (
+                HandoffFailure::Descriptor {
+                    start: at,
+                    error: BuildError::Full,
+                },
+                "the firmware's descriptor at 0x100000 does not fit the working space",
+            ),
+            (
+                HandoffFailure::SetAside {
+                    start: at,
+                    error: BuildError::NotLoaderMemory,
+                },
+                "the kernel's range at 0x100000 is not wholly the boot stage's memory",
+            ),
+            (
+                HandoffFailure::SetAside {
+                    start: at,
+                    error: BuildError::Empty,
+                },
+                "the kernel's range at 0x100000 has no pages",
+            ),
+            (
+                HandoffFailure::Write(BuildError::OutputTooSmall { needed: 40_000 }),
+                "the structure needs 40000 bytes, more than the window's 32768",
+            ),
+        ];
+        for (failure, reason) in cases {
+            assert_eq!(
+                handoff_error_line(&failure).as_str(),
+                format!("{prefix}{reason}")
+            );
+        }
+        let longest = handoff_error_line(&HandoffFailure::SetAside {
+            start: u64::MAX,
+            error: BuildError::NotLoaderMemory,
+        });
         assert!(longest.as_str().len() < Line::CAPACITY);
     }
 
@@ -1028,6 +1230,14 @@ mod tests {
             (
                 ExitFailure::Allocate(None),
                 "no memory for the memory map: no interface".to_string(),
+            ),
+            (
+                ExitFailure::Space(Some(0x8000_0000_0000_0009)),
+                "no memory for the hand-off's working space: status 0x8000000000000009".to_string(),
+            ),
+            (
+                ExitFailure::Space(None),
+                "no memory for the hand-off's working space: no interface".to_string(),
             ),
             (
                 ExitFailure::ReadMap(status),

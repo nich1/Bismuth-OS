@@ -81,8 +81,9 @@ The report is sorted `key: value` lines. Today it holds:
 - `third-party packages`: how many packages in `Cargo.lock` come from outside
   the repository. The project has no dependencies, so this is 0.
 - `unsafe blocks in <file>` and `unsafe fn declarations in <file>`: for each
-  Rust file under `boot/src`, `kernel/src`, `descriptors/src`, `elf/src`,
-  `frames/src`, `handoff/src` and `paging/src`, how many `unsafe { ... }` blocks and
+  Rust file under `boot/src`, `kernel/src`, `acpi/src`, `apic/src`,
+  `descriptors/src`, `elf/src`, `frames/src`, `handoff/src` and
+  `paging/src`, how many `unsafe { ... }` blocks and
   `unsafe fn` declarations it contains. `unsafe` marks code the compiler
   cannot check for memory safety, so its count is a rough measure of how much
   code has to be trusted by hand.

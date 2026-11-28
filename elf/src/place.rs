@@ -53,10 +53,45 @@ const _: () = assert!(STACK_GUARD == STACK_BOTTOM - PAGE_SIZE);
 // One 2 MiB region holds the stack and its guard page.
 const _: () = assert!(STACK_GUARD >> 21 == (STACK_TOP - 1) >> 21);
 
+/// How many 4 KiB pages the window for the hand-off structure has, and so
+/// the most the boot stage writes: 32 KiB, room for 1364 regions after the
+/// 24-byte header (`docs/handoff.md`). QEMU's firmware lists about a
+/// hundred descriptors and real machines a few hundred; each adds at most
+/// one region, and each range set aside for the kernel at most two, before
+/// neighbours are merged. A map that still does not fit is an error.
+pub const HANDOFF_PAGES: u64 = 8;
+/// Where the boot stage maps the hand-off structure's pages, read-only and
+/// not executable, for the kernel: in the same 2 MiB as the stack, below
+/// its guard page with unmapped pages between, so it needs no tables of
+/// its own and, being below [`KERNEL_BASE`], no segment can reach it.
+pub const HANDOFF_ADDRESS: u64 = 0xFFFF_FFFF_7FFE_0000;
+
+// The window lies wholly below the guard page, which stays unmapped, and
+// so below the stack and every segment; it starts on a page, in the 2 MiB
+// the stack's tables cover.
+const _: () = assert!(HANDOFF_ADDRESS.is_multiple_of(PAGE_SIZE));
+const _: () = assert!(HANDOFF_ADDRESS + HANDOFF_PAGES * PAGE_SIZE <= STACK_GUARD);
+const _: () = assert!(HANDOFF_ADDRESS >> 21 == (STACK_TOP - 1) >> 21);
+const _: () = assert!(HANDOFF_PAGES > 0);
+
 /// The most loadable segments with memory a placement holds. The kernel has
 /// one per kind of permission (read, read and execute, read and write), so
 /// eight leaves room without making the table large.
 pub const MAX_SEGMENTS: usize = 8;
+
+/// How many frames the boot stage takes, in one block, for the kernel's
+/// address tables: enough for any kernel these rules accept, which lies in
+/// the top 2 GiB, its stack and the hand-off window. The top-level table,
+/// one directory-pointer table, two directories for the kernel (each
+/// covers 1 GiB), and a last-level table for each 2 MiB a segment touches.
+/// A segment of `p` pages touches at most `p / 512 + 2` of those, and the
+/// segments take at most [`PAGE_LIMIT`] pages together. The stack, its
+/// guard page and the hand-off window lie in the 2 MiB just below the
+/// kernel's 2 GiB, in the 1 GiB below them, so they take one directory and
+/// one last-level table more, shared with no segment. In all, 4 + 16384 /
+/// 512 + 2 * 8 + 2 = 54 frames. The block is the kernel's, all of it, in
+/// the hand-off structure.
+pub const TABLE_FRAMES: u64 = 4 + PAGE_LIMIT / 512 + 2 * MAX_SEGMENTS as u64 + 2;
 
 /// Why a file cannot be placed as linked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
