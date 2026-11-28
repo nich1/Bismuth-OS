@@ -597,8 +597,8 @@ fn boot(disk: &str) -> Result<(Option<i32>, String)> {
 enum Stop {
     /// The step ran and failed, for this reason.
     Failed(String),
-    /// The step needs QEMU, which could not be found.
-    QemuMissing,
+    /// The step needs QEMU, which is not installed. Says where it looked.
+    QemuMissing(String),
 }
 
 /// One step of `check`: its name, and what runs it. On success it returns a
@@ -616,6 +616,9 @@ const CHECK_NOT_RUN_EXIT: u8 = 3;
 /// one finishes, and a last line saying how the check ended. Returns the
 /// exit code.
 ///
+/// Each step's line starts with `check: `, so the lines can be picked out of
+/// the tools' own output. The last line is the verdict.
+///
 /// The first failing step ends the check; the steps after it do not run. A
 /// step that finds QEMU missing is a failure if `require_qemu`; otherwise the
 /// rest still run, and unless one fails, the last line says what did not run.
@@ -624,24 +627,24 @@ fn run_steps(steps: Vec<Step>, require_qemu: bool, report: &mut dyn FnMut(&str))
     for (name, step) in steps {
         let reason = match step() {
             Ok(note) if note.is_empty() => {
-                report(&format!("{name}: ok"));
+                report(&format!("check: {name}: ok"));
                 continue;
             }
             Ok(note) => {
-                report(&format!("{name}: ok, {note}"));
+                report(&format!("check: {name}: ok, {note}"));
                 continue;
             }
-            Err(Stop::QemuMissing) if !require_qemu => {
-                report(&format!("{name}: NOT RUN"));
+            Err(Stop::QemuMissing(looked)) if !require_qemu => {
+                report(&format!("check: {name}: NOT RUN: {looked}"));
                 not_run.get_or_insert(name);
                 continue;
             }
-            Err(Stop::QemuMissing) => {
-                "QEMU is not installed and BISMUTH_REQUIRE_QEMU is set".to_string()
+            Err(Stop::QemuMissing(looked)) => {
+                format!("QEMU is not installed and BISMUTH_REQUIRE_QEMU is set: {looked}")
             }
             Err(Stop::Failed(reason)) => reason,
         };
-        report(&format!("{name}: FAILED: {reason}"));
+        report(&format!("check: {name}: FAILED: {reason}"));
         report(&format!("check FAILED at {name}"));
         return 1;
     }
@@ -723,9 +726,9 @@ fn check() -> Result<()> {
         ("kernel file", Box::new(|| passed(check_kernel()))),
         (
             "boot test",
-            Box::new(|| match find_qemu() {
+            Box::new(|| match look_for_qemu() {
                 Ok(_) => passed(test()),
-                Err(_) => Err(Stop::QemuMissing),
+                Err(looked) => Err(Stop::QemuMissing(looked)),
             }),
         ),
     ];
@@ -769,34 +772,58 @@ fn qemu_command(disk: &str) -> Result<Command> {
     Ok(command)
 }
 
-/// Finds the QEMU program: `BISMUTH_QEMU`, then `PATH`, then the default
-/// Windows install folder. A `BISMUTH_QEMU` that names no file counts as no
-/// QEMU, without looking further.
-fn find_qemu() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("BISMUTH_QEMU") {
-        let path = PathBuf::from(path);
-        if !path.is_file() {
-            return Err(format!("BISMUTH_QEMU names {}, not a file", path.display()));
-        }
-        return Ok(path);
+/// The name QEMU's program is started by from `PATH`.
+const QEMU_NAME: &str = "qemu-system-x86_64";
+
+/// Decides which QEMU program to run: `variable` (the value of
+/// `BISMUTH_QEMU`) as given, if set; otherwise [`QEMU_NAME`] if `on_path`
+/// says it starts from `PATH`; otherwise the first of the `usual` install
+/// paths that exists, as marked. If none, QEMU is not installed, and the
+/// error says where it looked.
+fn locate_qemu(
+    variable: Option<std::ffi::OsString>,
+    on_path: impl FnOnce() -> bool,
+    usual: &[(&Path, bool)],
+) -> Result<PathBuf> {
+    if let Some(path) = variable {
+        return Ok(path.into());
     }
-    let name = "qemu-system-x86_64";
-    let on_path = Command::new(name)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok();
-    if on_path {
-        return Ok(name.into());
+    if on_path() {
+        return Ok(QEMU_NAME.into());
     }
-    let windows_default = Path::new(r"C:\Program Files\qemu\qemu-system-x86_64.exe");
-    if windows_default.is_file() {
-        return Ok(windows_default.to_path_buf());
+    if let Some((path, _)) = usual.iter().find(|(_, exists)| *exists) {
+        return Ok(path.to_path_buf());
     }
+    let paths: Vec<String> = usual.iter().map(|(p, _)| p.display().to_string()).collect();
     Err(format!(
-        "could not find {name}. Install QEMU, or set BISMUTH_QEMU to its path"
+        "BISMUTH_QEMU is not set, {QEMU_NAME} is not on PATH, and {} does not exist",
+        paths.join(" or ")
     ))
+}
+
+/// Looks for QEMU as [`locate_qemu`] says, on this machine.
+fn look_for_qemu() -> Result<PathBuf> {
+    let on_path = || {
+        Command::new(QEMU_NAME)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+    };
+    let windows_default = Path::new(r"C:\Program Files\qemu\qemu-system-x86_64.exe");
+    let usual = [(windows_default, windows_default.is_file())];
+    locate_qemu(env::var_os("BISMUTH_QEMU"), on_path, &usual)
+}
+
+/// Finds the QEMU program: `BISMUTH_QEMU`, then `PATH`, then the default
+/// Windows install folder.
+fn find_qemu() -> Result<PathBuf> {
+    look_for_qemu().map_err(|looked| {
+        format!(
+            "could not find {QEMU_NAME} ({looked}). Install QEMU, or set BISMUTH_QEMU to its path"
+        )
+    })
 }
 
 /// UEFI firmware files for QEMU.
@@ -928,12 +955,14 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KERNEL_BASE, Scenario, Step, Stop, boot_failure, describe_kernel, layout_problems,
-        paths_in_markdown, run_steps, scenarios,
+        KERNEL_BASE, Result, Scenario, Step, Stop, boot_failure, describe_kernel, layout_problems,
+        locate_qemu, paths_in_markdown, run_steps, scenarios,
     };
     use bismuth_elf::FileType::{Executable, SharedObject};
     use bismuth_elf::{Flags, Segment};
     use std::cell::RefCell;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
 
     fn missing() -> Scenario {
         Scenario::error("missing", None, "file not found")
@@ -1188,7 +1217,7 @@ mod tests {
                         Fake::Pass => Ok(String::new()),
                         Fake::Note => Ok("3 things".to_string()),
                         Fake::Fail => Err(Stop::Failed(format!("{name} broke"))),
-                        Fake::NoQemu => Err(Stop::QemuMissing),
+                        Fake::NoQemu => Err(Stop::QemuMissing("looked here".to_string())),
                     }
                 };
                 (name, Box::new(step))
@@ -1204,7 +1233,15 @@ mod tests {
     #[test]
     fn a_check_where_every_step_passes_ends_with_check_passed() {
         let (lines, ran, code) = run_fakes(&[Fake::Pass, Fake::Note, Fake::Pass], false);
-        assert_eq!(lines, ["a: ok", "b: ok, 3 things", "c: ok", "check passed"]);
+        assert_eq!(
+            lines,
+            [
+                "check: a: ok",
+                "check: b: ok, 3 things",
+                "check: c: ok",
+                "check passed"
+            ]
+        );
         assert_eq!(ran, ["a", "b", "c"]);
         assert_eq!(code, 0);
     }
@@ -1215,8 +1252,11 @@ mod tests {
             let mut fakes = [Fake::Pass; 3];
             fakes[at] = Fake::Fail;
             let (lines, ran, code) = run_fakes(&fakes, false);
-            let mut expected: Vec<String> = ran[..at].iter().map(|n| format!("{n}: ok")).collect();
-            expected.push(format!("{name}: FAILED: {name} broke"));
+            let mut expected: Vec<String> = ran[..at]
+                .iter()
+                .map(|n| format!("check: {n}: ok"))
+                .collect();
+            expected.push(format!("check: {name}: FAILED: {name} broke"));
             expected.push(format!("check FAILED at {name}"));
             assert_eq!(lines, expected);
             // The steps after the failing one do not run.
@@ -1231,9 +1271,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "a: ok",
-                "b: NOT RUN",
-                "c: ok",
+                "check: a: ok",
+                "check: b: NOT RUN: looked here",
+                "check: c: ok",
                 "b NOT RUN: QEMU is not installed"
             ]
         );
@@ -1247,8 +1287,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "a: ok",
-                "b: FAILED: QEMU is not installed and BISMUTH_REQUIRE_QEMU is set",
+                "check: a: ok",
+                "check: b: FAILED: QEMU is not installed and BISMUTH_REQUIRE_QEMU is set: \
+                 looked here",
                 "check FAILED at b"
             ]
         );
@@ -1260,16 +1301,79 @@ mod tests {
     fn a_failure_wins_over_missing_qemu() {
         // A failure before the step that needs QEMU: that step never runs.
         let (lines, ran, code) = run_fakes(&[Fake::Fail, Fake::NoQemu], false);
-        assert_eq!(lines, ["a: FAILED: a broke", "check FAILED at a"]);
+        assert_eq!(lines, ["check: a: FAILED: a broke", "check FAILED at a"]);
         assert_eq!(ran, ["a"]);
         assert_eq!(code, 1);
         // A failure after it still ends the check as failed.
         let (lines, _, code) = run_fakes(&[Fake::NoQemu, Fake::Fail], false);
         assert_eq!(
             lines,
-            ["a: NOT RUN", "b: FAILED: b broke", "check FAILED at b"]
+            [
+                "check: a: NOT RUN: looked here",
+                "check: b: FAILED: b broke",
+                "check FAILED at b"
+            ]
         );
         assert_eq!(code, 1);
+    }
+
+    /// `locate_qemu` with `variable` set or not and QEMU's usual install
+    /// path present or not, where the `PATH` lookup answers `on_path`.
+    fn locate(variable: Option<&str>, on_path: bool, usual_exists: bool) -> Result<PathBuf> {
+        let usual = Path::new("C:/usual/qemu.exe");
+        locate_qemu(
+            variable.map(OsString::from),
+            || on_path,
+            &[(usual, usual_exists)],
+        )
+    }
+
+    #[test]
+    fn a_set_bismuth_qemu_is_used_as_given() {
+        // A bare name or a path without `.exe` that QEMU starts from.
+        for value in [
+            "qemu-system-x86_64",
+            "C:/Program Files/qemu/qemu-system-x86_64",
+        ] {
+            assert_eq!(locate(Some(value), false, false), Ok(PathBuf::from(value)));
+        }
+        // One QEMU cannot start from is still used, so starting it fails
+        // with the reason instead of falling back or counting as not
+        // installed, and `PATH` is not searched.
+        let missing = "C:/no/such/qemu";
+        let not_asked = || -> bool { panic!("PATH was searched") };
+        assert_eq!(
+            locate_qemu(Some(missing.into()), not_asked, &[]),
+            Ok(PathBuf::from(missing))
+        );
+        assert_eq!(
+            locate(Some(missing), true, true),
+            Ok(PathBuf::from(missing))
+        );
+    }
+
+    #[test]
+    fn an_unset_bismuth_qemu_finds_qemu_on_path_then_in_its_usual_place() {
+        assert_eq!(
+            locate(None, true, true),
+            Ok(PathBuf::from("qemu-system-x86_64"))
+        );
+        assert_eq!(
+            locate(None, false, true),
+            Ok(PathBuf::from("C:/usual/qemu.exe"))
+        );
+    }
+
+    #[test]
+    fn qemu_found_nowhere_says_where_it_looked() {
+        assert_eq!(
+            locate(None, false, false),
+            Err(
+                "BISMUTH_QEMU is not set, qemu-system-x86_64 is not on PATH, and \
+                 C:/usual/qemu.exe does not exist"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
