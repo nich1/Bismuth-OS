@@ -11,6 +11,8 @@ unsafe blocks in boot/src/serial.rs: 3
 unsafe blocks in boot/src/uefi.rs: 2
 unsafe blocks in boot/src/uefi/boot_services.rs: 6
 unsafe blocks in boot/src/uefi/file.rs: 13
+unsafe blocks in descriptors/src/lib.rs: 0
+unsafe blocks in descriptors/src/tests.rs: 0
 unsafe blocks in elf/src/lib.rs: 0
 unsafe blocks in elf/src/place.rs: 0
 unsafe blocks in elf/src/place/tests.rs: 0
@@ -37,6 +39,8 @@ unsafe fn declarations in boot/src/serial.rs: 0
 unsafe fn declarations in boot/src/uefi.rs: 1
 unsafe fn declarations in boot/src/uefi/boot_services.rs: 2
 unsafe fn declarations in boot/src/uefi/file.rs: 1
+unsafe fn declarations in descriptors/src/lib.rs: 0
+unsafe fn declarations in descriptors/src/tests.rs: 0
 unsafe fn declarations in elf/src/lib.rs: 0
 unsafe fn declarations in elf/src/place.rs: 0
 unsafe fn declarations in elf/src/place/tests.rs: 0
