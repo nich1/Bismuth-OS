@@ -56,8 +56,8 @@ tasks:
           build, then print the footprint report; --update also stores it
           in snapshots/footprint.txt
   check   what the CI workflow runs on a pull request: feature map check,
-          format, lint, unit tests, footprint snapshot, kernel file check,
-          boot scenarios (not the text checks)
+          format, lint, unit tests, footprint snapshot, kernel file checks,
+          reproducible kernel file, boot scenarios (not the text checks)
 
 code host tasks (need gh, GitHub's command-line tool):
   issue-list [--label <name>]
@@ -217,26 +217,170 @@ fn build_boot(features: &[&str]) -> Result<PathBuf> {
         .join(format!("{BOOT_PACKAGE}.efi")))
 }
 
-/// Builds the kernel with `features` and returns where the file is. Each
-/// build replaces the one before it at that place.
+/// Builds the kernel with `features` and returns where its lean file is (see
+/// [`build_kernel_in`]).
 fn build_kernel(features: &[&str]) -> Result<PathBuf> {
+    build_kernel_in(&root(), features)
+}
+
+/// Builds the kernel of the repository at `root` with `features`, writes
+/// its full and lean files (see [`split_kernel`]) next to the linker's
+/// output, and returns where the lean file is. Each build replaces the one
+/// before it at that place.
+///
+/// The kernel is built with [`remap_config`], so the folder it is built in
+/// leaves no trace in the file.
+fn build_kernel_in(root: &Path, features: &[&str]) -> Result<PathBuf> {
     let mut command = cargo();
-    command.args([
+    command.current_dir(root).args([
         "build",
         "--package",
         KERNEL_PACKAGE,
         "--target",
         KERNEL_TARGET,
+        "--config",
+        &remap_config(root)?,
     ]);
     if !features.is_empty() {
         command.args(["--features", &features.join(",")]);
     }
     run_checked(&mut command, "cargo build (kernel)")?;
-    Ok(root()
-        .join("target")
+    let linked = linked_kernel(root);
+    let bytes = fs::read(&linked)
+        .map_err(|error| format!("could not read {}: {error}", linked.display()))?;
+    let (full, lean) = split_kernel(&bytes)?;
+    for (path, bytes) in [(full_kernel(root), full), (lean_kernel(root), lean)] {
+        fs::write(&path, bytes)
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    }
+    Ok(lean_kernel(root))
+}
+
+/// Where cargo puts the kernel file the linker made, for the repository at
+/// `root`.
+fn linked_kernel(root: &Path) -> PathBuf {
+    root.join("target")
         .join(KERNEL_TARGET)
         .join("debug")
-        .join(KERNEL_PACKAGE))
+        .join(KERNEL_PACKAGE)
+}
+
+/// Where [`build_kernel_in`] puts the full kernel file, kept for debugging.
+fn full_kernel(root: &Path) -> PathBuf {
+    linked_kernel(root).with_file_name(format!("{KERNEL_PACKAGE}.full"))
+}
+
+/// Where [`build_kernel_in`] puts the lean kernel file, the one that goes on
+/// the boot disk.
+fn lean_kernel(root: &Path) -> PathBuf {
+    linked_kernel(root).with_file_name(format!("{KERNEL_PACKAGE}.lean"))
+}
+
+/// A `--config` value that adds `--remap-path-prefix=<root>=.` to the
+/// kernel target's flags. Cargo joins it to the flags in
+/// `.cargo/config.toml`, which cannot name the folder themselves. Without
+/// it the debug information holds the folder the kernel was built in (as
+/// the compilation directory), so the file's bytes and size change with
+/// the folder.
+fn remap_config(root: &Path) -> Result<String> {
+    let root = root
+        .to_str()
+        .ok_or_else(|| format!("{} is not UTF-8", root.display()))?;
+    let flag = format!("--remap-path-prefix={root}=.");
+    // A TOML basic string: backslash and quote escaped, and no control
+    // characters, which a folder name has no use for.
+    if flag.chars().any(char::is_control) {
+        return Err(format!("{root} holds a control character"));
+    }
+    let quoted = flag.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("target.{KERNEL_TARGET}.rustflags=[\"{quoted}\"]"))
+}
+
+/// The kernel file the linker made, `linked`, as two files: a full one with
+/// every section, for debugging, and a lean one with only what a loader
+/// reads. Returns `(full, lean)`.
+///
+/// The linker puts the file header in the first loadable segment, so the
+/// offset of the section header table is loaded with the kernel. Both files
+/// therefore keep that table at one offset, just after the loaded contents
+/// (the file header, the program header table and every segment's bytes),
+/// and are the same up to it: the full file moves every section that lies
+/// after the loaded contents to after the table, the section names first;
+/// the lean file keeps only the names, and marks the other moved sections
+/// as taking no space in the file (gABI ch. 4, "Sections", `SHT_NOBITS`).
+fn split_kernel(linked: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    bismuth_elf::Elf::parse(linked)
+        .map_err(|error| format!("the ELF reader rejected the kernel: {error:?}"))?;
+    // gABI ch. 5, "Program Header": `p_offset` is the eight bytes at 8 and
+    // `p_filesz` the eight at 32. The reader checked the table is inside.
+    let programs = get_u64(linked, 32) as usize;
+    let count = usize::from(u16::from_le_bytes([linked[56], linked[57]]));
+    let mut loaded = (programs + 56 * count).max(64);
+    for index in 0..count {
+        let at = programs + 56 * index;
+        match end_in(linked, get_u64(linked, at + 8), get_u64(linked, at + 32)) {
+            Some(end) => loaded = loaded.max(end),
+            None => return Err(format!("program header {index} reaches past the file")),
+        }
+    }
+    // gABI ch. 4, "ELF Header": `e_shoff` is the eight bytes at 40,
+    // `e_shentsize`, `e_shnum` and `e_shstrndx` the two each at 58, 60, 62.
+    let field = |at: usize| usize::from(u16::from_le_bytes([linked[at], linked[at + 1]]));
+    let (sections, names) = (field(60), field(62));
+    let old_table = end_in(linked, get_u64(linked, 40), 64 * sections as u64)
+        .filter(|_| field(58) == 64 && names < sections)
+        .ok_or("the kernel's section header table is not as the linker writes it")?
+        - 64 * sections;
+    let table = loaded.next_multiple_of(8);
+    let mut full = linked[..loaded].to_vec();
+    full.resize(table, 0);
+    full.extend_from_slice(&linked[old_table..old_table + 64 * sections]);
+    set_u64(&mut full, 40, table as u64);
+    // gABI ch. 4, "Sections": `sh_type` is the four bytes at 4, `sh_offset`
+    // the eight at 24, `sh_size` at 32 and `sh_addralign` at 48.
+    let mut moved = Vec::new();
+    for index in std::iter::once(names).chain((0..sections).filter(|&i| i != names)) {
+        let header = table + 64 * index;
+        let (offset, size) = (get_u64(&full, header + 24), get_u64(&full, header + 32));
+        let end = end_in(linked, offset, size);
+        if full[header + 4..header + 8] == SHT_NOBITS || end.is_some_and(|end| end <= loaded) {
+            continue;
+        }
+        let Some(end) = end.filter(|_| offset as usize >= loaded) else {
+            return Err(format!(
+                "section {index} is partly loaded or outside the file"
+            ));
+        };
+        let at = full
+            .len()
+            .next_multiple_of(get_u64(&full, header + 48).max(1) as usize);
+        full.resize(at, 0);
+        full.extend_from_slice(&linked[offset as usize..end]);
+        set_u64(&mut full, header + 24, at as u64);
+        moved.push(index);
+    }
+    let names_end = table + 64 * names;
+    let lean_end = if moved.first() == Some(&names) {
+        (get_u64(&full, names_end + 24) + get_u64(&full, names_end + 32)) as usize
+    } else {
+        table + 64 * sections
+    };
+    let mut lean = full[..lean_end].to_vec();
+    for &index in moved.iter().filter(|&&index| index != names) {
+        let header = table + 64 * index;
+        lean[header + 4..header + 8].copy_from_slice(&SHT_NOBITS);
+    }
+    Ok((full, lean))
+}
+
+/// gABI ch. 4, "Sections": the type of a section that takes no space in the
+/// file, as its four little-endian bytes.
+const SHT_NOBITS: [u8; 4] = 8u32.to_le_bytes();
+
+/// The end of the `size` bytes at `offset` in `file`, if they lie inside it.
+fn end_in(file: &[u8], offset: u64, size: u64) -> Option<usize> {
+    let end = usize::try_from(offset.checked_add(size)?).ok()?;
+    (end <= file.len()).then_some(end)
 }
 
 /// Copies `from` to `to`, creating the folder `to` goes in.
@@ -546,12 +690,101 @@ fn set_u64(file: &mut [u8], at: usize, value: u64) {
     file[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-/// Runs the ELF reader on the kernel file [`build`] produced.
+/// Runs the ELF reader on the kernel file [`build`] produced, and checks
+/// that the full kernel file it left next to the build loads the same pages.
 fn check_kernel() -> Result<()> {
-    let path = kernel_image();
-    let bytes =
-        fs::read(&path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    print!("kernel file check passed: {}", describe_kernel(&bytes)?);
+    let read = |path: PathBuf| {
+        fs::read(&path).map_err(|error| format!("could not read {}: {error}", path.display()))
+    };
+    let lean = read(kernel_image())?;
+    print!("kernel file check passed: {}", describe_kernel(&lean)?);
+    // The build that put the lean file on the disk left the full one here.
+    let full = read(full_kernel(&root()))?;
+    let parse = |bytes| {
+        bismuth_elf::Elf::parse(bytes)
+            .map_err(|error| format!("the ELF reader rejected the kernel: {error:?}"))
+    };
+    let images = page_images(&lean, &parse(&lean)?);
+    if images != page_images(&full, &parse(&full)?) {
+        return Err("the lean kernel file loads other pages than the full one".into());
+    }
+    let pages: usize = images.iter().map(|image| image.len() / 4096).sum();
+    println!(
+        "the lean kernel file, {} bytes, and the full one, {} bytes, load the same {pages} pages",
+        lean.len(),
+        full.len()
+    );
+    Ok(())
+}
+
+/// Builds the normal kernel in this repository and in a copy of it in a
+/// folder of the system's temporary folder, and fails unless the linker's,
+/// the full and the lean kernel files are the same bytes in both. Returns a
+/// note for the check's summary line.
+fn check_reproducible() -> Result<String> {
+    let here = root();
+    let there = env::temp_dir().join(format!("bismuth-reproducible-{}", std::process::id()));
+    if there.exists() {
+        fs::remove_dir_all(&there)
+            .map_err(|error| format!("could not clear {}: {error}", there.display()))?;
+    }
+    let compare = || -> Result<String> {
+        copy_tree(&here, &there, &["target", ".git"])?;
+        build_kernel_in(&here, &[])?;
+        build_kernel_in(&there, &[])?;
+        let read = |path: PathBuf| {
+            fs::read(&path).map_err(|error| format!("could not read {}: {error}", path.display()))
+        };
+        let mut sizes = Vec::new();
+        for (name, path) in [
+            ("linker's", linked_kernel as fn(&Path) -> PathBuf),
+            ("full", full_kernel),
+            ("lean", lean_kernel),
+        ] {
+            let (mine, copy) = (read(path(&here))?, read(path(&there))?);
+            if mine != copy {
+                return Err(format!(
+                    "the {name} kernel file differs when built in {}: {} bytes here, {} there",
+                    there.display(),
+                    mine.len(),
+                    copy.len()
+                ));
+            }
+            sizes.push(format!("{name} {} bytes", mine.len()));
+        }
+        Ok(format!(
+            "the same kernel files from another folder ({})",
+            sizes.join(", ")
+        ))
+    };
+    let result = compare();
+    // A leftover only takes space; the next run clears it.
+    let _ = fs::remove_dir_all(&there);
+    result
+}
+
+/// Copies the folder `from` to `to`, all but the entries of `from` itself
+/// named in `skip`.
+fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> Result<()> {
+    fs::create_dir_all(to)
+        .map_err(|error| format!("could not create {}: {error}", to.display()))?;
+    let entries = fs::read_dir(from)
+        .map_err(|error| format!("could not list {}: {error}", from.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("could not list {}: {error}", from.display()))?;
+        if skip.iter().any(|name| entry.file_name() == *name) {
+            continue;
+        }
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("could not inspect {}: {error}", entry.path().display()))?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target, &[])?;
+        } else {
+            copy_file(&entry.path(), &target)?;
+        }
+    }
     Ok(())
 }
 
@@ -565,6 +798,7 @@ fn footprint_report() -> Result<String> {
     Ok(footprint::report(&footprint::measure(
         &root(),
         &boot_image(),
+        &kernel_image(),
     )?))
 }
 
@@ -1433,6 +1667,10 @@ fn check() -> Result<()> {
         ("footprint", Box::new(|| passed(check_snapshot()))),
         ("kernel file", Box::new(|| passed(check_kernel()))),
         (
+            "reproducible kernel file",
+            Box::new(|| check_reproducible().map_err(Stop::Failed)),
+        ),
+        (
             "boot test",
             Box::new(|| match look_for_qemu() {
                 Ok(_) => passed(test()),
@@ -1664,9 +1902,9 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 mod tests {
     use super::{
         DELIBERATE_FAULTS, FaultLine, KERNEL_SUCCESS_EXIT, QEMU_SUCCESS_EXIT, Result, Scenario,
-        Step, Stop, boot_failure, damaged_handoff_scenario, describe_kernel, fault_scenario,
-        locate_qemu, page_images, panic_scenario, paths_in_markdown, placed_line, run_steps,
-        scenarios,
+        Step, Stop, boot_failure, copied_line, damaged_handoff_scenario, describe_kernel,
+        fault_scenario, get_u64, locate_qemu, page_images, panic_scenario, paths_in_markdown,
+        placed_line, remap_config, run_steps, scenarios, set_u64, split_kernel,
     };
     use bismuth_elf::place::{
         Error as PlaceError, KERNEL_BASE, PAGE_LIMIT, STACK_BOTTOM, STACK_GUARD, STACK_TOP,
@@ -1845,7 +2083,7 @@ mod tests {
     /// segment with `flags`, holding the whole file at [`KERNEL_BASE`], and
     /// whose entry is `entry`. Layouts from the gABI "ELF Header" and
     /// "Program Header" sections.
-    fn kernel_file(flags: u32, entry: u64, headers: u16) -> Vec<u8> {
+    pub(crate) fn kernel_file(flags: u32, entry: u64, headers: u16) -> Vec<u8> {
         let mut file = vec![0u8; 4096];
         let mut put = |at: usize, bytes: &[u8]| file[at..at + bytes.len()].copy_from_slice(bytes);
         put(0, &[0x7F, b'E', b'L', b'F', 2, 1, 1]);
@@ -1945,6 +2183,133 @@ mod tests {
             *byte = i as u8;
         }
         file
+    }
+
+    /// [`two_segment_kernel`] as the linker leaves it: a third program
+    /// header that loads nothing (`PT_NOTE`) with its contents after the
+    /// segments, then a section standing for debug information, the
+    /// section names and the section header table, which the file header
+    /// points to. Layouts from the gABI "ELF Header", "Program Header" and
+    /// "Sections" sections.
+    fn linked_kernel_file() -> Vec<u8> {
+        let mut file = two_segment_kernel();
+        file[56..58].copy_from_slice(&3u16.to_le_bytes());
+        set_u64(&mut file, 176, 4); // PT_NOTE, no flags
+        set_u64(&mut file, 184, 0x2000);
+        set_u64(&mut file, 208, 0x10);
+        file.extend([0x4E; 0x10]); // The note, to 0x2010.
+        file.extend([0xDB; 0x31]); // Debug information, to 0x2041.
+        file.extend(LINKED_NAMES); // Section names, to 0x205E.
+        let table = file.len().next_multiple_of(8);
+        file.resize(table, 0);
+        let section = |name: u32, kind: u32, offset: u64, size: u64| {
+            let mut header = [0u8; 64];
+            header[0..4].copy_from_slice(&name.to_le_bytes());
+            header[4..8].copy_from_slice(&kind.to_le_bytes());
+            header[24..32].copy_from_slice(&offset.to_le_bytes());
+            header[32..40].copy_from_slice(&size.to_le_bytes());
+            header[48..56].copy_from_slice(&1u64.to_le_bytes());
+            header
+        };
+        let names = LINKED_NAMES.len() as u64;
+        for header in [
+            section(0, 0, 0, 0),
+            section(1, 1, 0x1000, 0x1000), // .text, loaded
+            section(7, 1, 0x2010, 0x31),   // .debug_info
+            section(19, 3, 0x2041, names), // .shstrtab
+            section(29, 8, 0x2010, 0x100), // .bss
+        ] {
+            file.extend(header);
+        }
+        set_u64(&mut file, 40, table as u64);
+        file[58..60].copy_from_slice(&64u16.to_le_bytes());
+        file[60..62].copy_from_slice(&5u16.to_le_bytes());
+        file[62..64].copy_from_slice(&3u16.to_le_bytes());
+        file
+    }
+
+    /// The section names of [`linked_kernel_file`].
+    const LINKED_NAMES: &[u8] = b"\0.text\0.debug_info\0.shstrtab\0.bss\0";
+
+    /// The `sh_type` and `sh_offset` of section `index` in `file`.
+    fn section_at(file: &[u8], index: usize) -> (u32, u64) {
+        let header = get_u64(file, 40) as usize + 64 * index;
+        let kind = u32::from_le_bytes(file[header + 4..header + 8].try_into().expect("four"));
+        (kind, get_u64(file, header + 24))
+    }
+
+    #[test]
+    fn the_full_and_lean_kernel_files_load_the_same_pages() {
+        let linked = linked_kernel_file();
+        let (full, lean) = split_kernel(&linked).expect("splits");
+        let full_elf = bismuth_elf::Elf::parse(&full).expect("full reads");
+        let lean_elf = bismuth_elf::Elf::parse(&lean).expect("lean reads");
+        assert_eq!(page_images(&full, &full_elf), page_images(&lean, &lean_elf));
+        assert_eq!(copied_line(&full, &full_elf), copied_line(&lean, &lean_elf));
+        assert_eq!(placed_line(&full, &full_elf), placed_line(&lean, &lean_elf));
+        // The table follows the loaded contents, which end with the note.
+        assert_eq!(get_u64(&full, 40), 0x2010);
+        assert_eq!(full[..0x2010], lean[..0x2010]);
+        // Only the table's offset in the file header differs from the
+        // linker's file.
+        let mut header = linked[..0x2010].to_vec();
+        set_u64(&mut header, 40, 0x2010);
+        assert_eq!(full[..0x2010], header[..]);
+    }
+
+    #[test]
+    fn the_full_kernel_file_keeps_every_section_after_the_table() {
+        let (full, _) = split_kernel(&linked_kernel_file()).expect("splits");
+        // The table, five headers, then the names, then the debug section.
+        assert_eq!(full.len(), 0x2010 + 5 * 64 + LINKED_NAMES.len() + 0x31);
+        assert_eq!(section_at(&full, 1), (1, 0x1000));
+        assert_eq!(section_at(&full, 3), (3, 0x2150));
+        assert_eq!(full[0x2150..0x2150 + LINKED_NAMES.len()], *LINKED_NAMES);
+        let debug = 0x2150 + LINKED_NAMES.len();
+        assert_eq!(section_at(&full, 2), (1, debug as u64));
+        assert!(full[debug..].iter().all(|&byte| byte == 0xDB));
+        assert_eq!(section_at(&full, 4), (8, 0x2010));
+    }
+
+    #[test]
+    fn the_lean_kernel_file_keeps_only_the_section_names() {
+        let (full, lean) = split_kernel(&linked_kernel_file()).expect("splits");
+        assert_eq!(lean.len(), 0x2150 + LINKED_NAMES.len());
+        assert_eq!(lean[0x2150..], *LINKED_NAMES);
+        // The debug section takes no space in the file.
+        assert_eq!(section_at(&lean, 2), (8, section_at(&full, 2).1));
+        assert_eq!(section_at(&lean, 3), section_at(&full, 3));
+        assert!(
+            !lean
+                .windows(0x31)
+                .any(|run| run.iter().all(|&byte| byte == 0xDB))
+        );
+    }
+
+    #[test]
+    fn a_kernel_file_with_a_section_partly_loaded_is_refused() {
+        let mut linked = linked_kernel_file();
+        let header = get_u64(&linked, 40) as usize + 64 * 2;
+        set_u64(&mut linked, header + 24, 0x2008);
+        let error = split_kernel(&linked).expect_err("refused");
+        assert_eq!(error, "section 2 is partly loaded or outside the file");
+        let mut linked = linked_kernel_file();
+        let past = linked.len() as u64;
+        set_u64(&mut linked, 40, past);
+        let error = split_kernel(&linked).expect_err("refused");
+        assert_eq!(
+            error,
+            "the kernel's section header table is not as the linker writes it"
+        );
+    }
+
+    #[test]
+    fn the_remap_names_the_folder_as_a_toml_string() {
+        assert_eq!(
+            remap_config(Path::new(r#"C:\a "b"\c"#)).expect("formats"),
+            r#"target.x86_64-unknown-none.rustflags=["--remap-path-prefix=C:\\a \"b\"\\c=."]"#
+        );
+        assert!(remap_config(Path::new("/a\nb")).is_err());
     }
 
     #[test]

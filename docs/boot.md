@@ -47,7 +47,9 @@ The boot stage then does eight things:
    where its pages are, the kernel address they belong at, how many there
    are and their permissions. Then it reads the pages back and writes
    `BISMUTH KERNEL COPIED segments=2 pages=2 sum=0x108120a9f6b1b5b1` (the
-   numbers are an example, and the sum changes from build to build): the
+   numbers are an example; the sum changes when the kernel's source, its
+   build settings or the compiler change, but not with the folder or the
+   machine it is built on, see "The kernel file" below): the
    sum is a 64-bit FNV-1a checksum of every byte of those pages. A broken
    rule, or the firmware refusing pages, gets a line starting `BISMUTH
    KERNEL PLACE ERROR:` instead.
@@ -423,14 +425,39 @@ The boot stage is a firmware program: it is in the format the firmware knows
 how to load, and it can call the firmware's services. The kernel runs with
 nothing underneath it, no firmware and no operating system, so it is built for
 a different Rust target, `x86_64-unknown-none` (x86-64, no operating system).
-That target produces an ELF file. `cargo xtask build` copies it onto the boot
-disk at `target/esp/EFI/BISMUTH/KERNEL.ELF`, next to the boot stage. Today the
+That target produces an ELF file. `cargo xtask build` copies a lean copy of
+it onto the boot disk at `target/esp/EFI/BISMUTH/KERNEL.ELF`, next to the
+boot stage. Today the
 kernel's entry function checks its entry state, loads its own processor
 tables and writes `BISMUTH KERNEL TABLES OK`, reads the hand-off structure
 and writes its `MEMORY` line, then writes `BISMUTH KERNEL OK` and stops the
 processor in a loop. If the kernel panics, it writes `BISMUTH KERNEL PANIC`
 instead and stops; if it faults, it writes a `BISMUTH KERNEL FAULT` line
 and stops (`docs/kernel.md`).
+
+The file the linker makes is mostly debug information, which the boot stage
+never reads. So `cargo xtask` writes two files from it next to the build,
+under `target/x86_64-unknown-none/debug`: `bismuth-kernel.full`, with every
+section, for a debugger, and `bismuth-kernel.lean`, with only the file
+header, the program header table, the segments' bytes, the section header
+table and the section names. The lean one goes on the boot disk, and on
+every boot scenario's disk. The linker puts the file header inside the first
+segment, so the header's offset of the section header table is loaded with
+the kernel: both files therefore keep that table at the same offset, just
+after the segments, and are the same bytes up to it. They load the same
+pages, which `cargo xtask check` checks on the real files.
+
+The kernel's bytes depend only on its source, its build settings and the
+compiler. The compiler records the folder it ran in, in the debug
+information, so `cargo xtask` builds the kernel with
+`--remap-path-prefix=<folder>=.`, which writes `.` instead. Paths in the
+kernel's panic messages are already relative to the repository, or under
+`/rustc/`, for the compiler's own library. `cargo xtask check` builds the
+kernel in a copy of the repository in another folder and fails unless the
+files are the same. A plain `cargo build` of the kernel, without
+`cargo xtask`, still records the folder. Windows and Linux write those
+relative paths with different separators, so the files may still differ
+between the two.
 
 **ELF** is the standard executable format on Linux and most other Unix-like
 systems. A file starts with a *header* that says what kind of file it is, which
