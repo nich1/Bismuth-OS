@@ -13,3 +13,7 @@ workspace = true
 # Part of this repository, not a third-party package.
 bismuth-elf = { path = "../elf" }
 bismuth-paging = { path = "../paging" }
+
+[dev-dependencies]
+# Part of this repository: the kernel's fault report, tested here, uses it.
+bismuth-descriptors = { path = "../descriptors" }

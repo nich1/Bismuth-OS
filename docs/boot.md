@@ -122,7 +122,9 @@ relies on all of it, and must not rely on anything not listed.
 - **Interrupts:** off (`RFLAGS.IF` clear). But the firmware's interrupt
   table is still loaded, so a non-maskable interrupt, a machine check or
   a fault in the kernel runs the firmware's handler, on the kernel's
-  stack. That handler is in the lower half, which is still mapped.
+  stack, in the lower half, which is still mapped; the kernel relies on
+  that table and the firmware's segment table only until it has loaded
+  its own, its first act after checking this state (`docs/kernel.md`).
 - **Direction flag:** clear (`RFLAGS.DF`). The other bits of `RFLAGS` are
   undefined.
 - **Stack pointer:** `0xFFFF_FFFF_7FFF_FFF8`, eight below the top. On entry
@@ -364,6 +366,11 @@ with the file's entry point.
 | The last segment moved onto the last page of the address range | `BISMUTH KERNEL PLACE ERROR: segment ... uses the last page of the address range`, naming the last segment | 35 |
 | The real kernel file, on a processor without no-execute pages (QEMU's `-cpu qemu64,-nx`) | The `FILE OK` and `COPIED` lines, then `BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute` | 35 |
 | The kernel file built to panic on entry | Started, then `BISMUTH KERNEL PANIC`, and never `BISMUTH KERNEL OK` | 67 |
+
+Every scenario that reaches the kernel also expects `BISMUTH KERNEL TABLES
+OK`, which the kernel prints once it has loaded its own tables, between the
+`JUMP` line and the kernel's last line. Seven more scenarios, one per
+deliberate fault, follow these; they are described in `docs/kernel.md`.
 
 The `qemu-exit` features are off in normal builds. On a real PC nothing
 answers at that port, so the writes are left out entirely.

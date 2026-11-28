@@ -13,6 +13,20 @@ workspace = true
 # Ask QEMU to exit once the kernel has printed its line, or panicked. Only
 # the automated boot test turns this on; it must stay off for real hardware.
 qemu-exit = []
-# Panic as soon as the kernel starts, so the boot test can check the panic
-# handler. Only the boot test turns this on, for a second kernel file.
+# Panic as soon as the kernel has loaded its tables, so the boot test can
+# check the panic handler. Only the boot test turns this on, for a second kernel file.
 panic-at-entry = []
+# Make one deliberate fault once the kernel's tables are loaded, so the boot
+# test can check the kernel's own report of it (`kernel/src/deliberate.rs`).
+# Only the boot test turns one on, each for a kernel file of its own.
+fault-divide = []
+fault-invalid-opcode = []
+fault-write-read-only = []
+fault-run-data = []
+fault-guard-page = []
+fault-stack-overflow = []
+fault-last-vector = []
+
+[dependencies]
+# Part of this repository, not a third-party package.
+bismuth-descriptors = { path = "../descriptors" }

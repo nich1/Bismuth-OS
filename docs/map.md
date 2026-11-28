@@ -20,8 +20,13 @@ something.
 | Boot services | `boot/src/uefi/boot_services.rs` | Memory and page allocation and protocol lookup through the firmware | `cargo xtask test` |
 | Firmware file reading | `boot/src/uefi/file.rs` | Reads a whole file from the disk the boot stage was loaded from | `cargo xtask test` boots disks with a good, missing, empty and damaged kernel file |
 | Port access | `boot/src/port.rs` | Reads and writes x86 I/O ports | Used by serial output |
-| Kernel | `kernel/src/main.rs` | A separate program, built as an ELF file for the `x86_64-unknown-none` target. The boot stage reads, checks and copies its file, maps it at its address with a stack, and jumps to its entry point. The kernel checks the state it was entered in, prints `BISMUTH KERNEL OK` on the serial port and stops; a broken entry state prints `BISMUTH KERNEL ENTRY ERROR: ...` and its panic handler `BISMUTH KERNEL PANIC`. With `qemu-exit` it then exits QEMU (65, or 67 on either failure); `panic-at-entry` makes it panic at once, for the boot test | `cargo xtask test` boots it; `cargo xtask check` reads its file |
-| Processor instructions | `kernel/src/cpu.rs` | The entry stub, which records the stack pointer and flags as the boot stage left them and calls the kernel proper, and the halt loop | Used by the kernel |
+| Kernel | `kernel/src/main.rs` | A separate program, built as an ELF file for the `x86_64-unknown-none` target. The boot stage reads, checks and copies its file, maps it at its address with a stack, and jumps to its entry point. The kernel checks the state it was entered in, loads its own descriptor tables and prints `BISMUTH KERNEL TABLES OK`, then prints `BISMUTH KERNEL OK` on the serial port and stops; a broken entry state prints `BISMUTH KERNEL ENTRY ERROR: ...`, a fault `BISMUTH KERNEL FAULT ...` and its panic handler `BISMUTH KERNEL PANIC`. With `qemu-exit` it then exits QEMU (65, or 67 on any failure); `panic-at-entry` makes it panic once its tables are loaded, and each `fault-*` feature makes one deliberate fault, for the boot test | `cargo xtask test` boots it; `cargo xtask check` reads its file |
+| Processor instructions | `kernel/src/cpu.rs` | The entry stub, which records the stack pointer and flags as the boot stage left them and calls the kernel proper; reads of CR0, CR2 and the segment and task registers, the write of CR0; and the halt loop | Used by the kernel |
+| Processor takeover | `kernel/src/takeover.rs` | Owns the kernel's segment table, task state segment, interrupt table and the three emergency stacks (double fault, non-maskable interrupt, machine check) as statics written once; builds them with `bismuth-descriptors`, loads them in order, reads the selectors back and turns on `CR0.WP` (`docs/kernel.md`) | `cargo xtask test`: every kernel scenario expects its line |
+| Table loading | `kernel/src/load.rs` | `lgdt`, the far return that reloads CS, the data segment registers, `ltr` and `lidt`, each taking what the library built | `cargo xtask test`; the fault scenarios show the tables in use |
+| Entry stubs | `kernel/src/vectors.rs` | One assembly stub per vector, 0 to 255, assembled from the exception table's error-code mask, that makes the stack one frame and calls the handler, which prints the fault line and stops | `cargo xtask test` runs the fault scenarios |
+| Fault report | `kernel/src/fault.rs` | The frame the stubs build, the error-code mask from the library's exception table, each vector's name and the `BISMUTH KERNEL FAULT` line. No hardware code | `cargo xtask check` runs its unit tests through `xtask` |
+| Deliberate faults | `kernel/src/deliberate.rs` | With a `fault-*` feature, the one fault the boot test asks for: divide by zero, `ud2`, a write to a read-only page, a call into data, a read of the guard page, a stack overflow, or `int 255` | `cargo xtask test` builds one kernel file per fault |
 | Entry checks | `kernel/src/entry.rs` | Checks the recorded entry state against the contract in `docs/boot.md`: interrupts off, direction flag clear, stack pointer aligned for a function entry and in the top half. No hardware code | `cargo xtask check` runs its unit tests through `xtask`; `cargo xtask test` boots it |
 | Kernel port access | `kernel/src/port.rs` | Reads and writes x86 I/O ports, and with `qemu-exit` makes QEMU exit | Used by the kernel's serial output |
 | Kernel serial output | `kernel/src/serial.rs` | Sets up the first serial port again and writes text to it | `cargo xtask test` reads what it prints |
@@ -30,7 +35,7 @@ something.
 | Frame tracker | `frames/src/lib.rs` | Safe, allocation-free library that keeps track of which 4 KiB frames of a range of physical memory are free, in a bitmap the caller lends it: adds usable ranges, reserves taken ones, hands out the lowest free frame and takes it back, refuses bad calls with an error, and keeps exact counts with a recount to check them against. Not used by the boot stage or the kernel yet | `cargo xtask check` runs its unit tests (`frames/src/tests.rs`) |
 | Address table builder | `paging/src/lib.rs` | Safe, allocation-free library that builds x86-64 4-level address tables (page tables): maps a range of virtual addresses to physical ones with 4 KiB pages and read, write and execute permissions, in memory the caller lends it, and looks an address up the way the processor does. The boot stage uses it to put the kernel at its address and to check the result | `cargo xtask check` runs its unit tests (`paging/src/tests.rs`) |
 | Hand-off structure | `handoff/src/lib.rs` | Safe, allocation-free library for the structure the boot stage will hand the kernel: Bismuth's own memory map, with each firmware memory type turned into one of Bismuth's kinds. The builder takes firmware descriptors in any order, sets ranges aside for the kernel and writes the sorted, merged list; the reader checks any bytes and lists the regions and the usable pages. Nothing uses it yet | `cargo xtask check` runs its unit tests (`handoff/src/tests.rs`) |
-| Descriptor tables | `descriptors/src/lib.rs` | Safe, allocation-free library with no hardware access that encodes and decodes the x86-64 descriptor table entries: segment selectors, the segment table (GDT) entries in the order the kernel will use (null, kernel code, kernel data, user data, user code, then the TSS descriptor), the 64-bit task state segment as 104 bytes with accessors, interrupt and trap gates, the 10-byte operand of `lgdt` and `lidt`, and the table of exceptions 0 to 31 with their error codes and classes. Refuses bad values with an error. Nothing uses it yet | `cargo xtask check` runs its unit tests (`descriptors/src/tests.rs`) |
+| Descriptor tables | `descriptors/src/lib.rs` | Safe, allocation-free library with no hardware access that encodes and decodes the x86-64 descriptor table entries: segment selectors, the segment table (GDT) entries in the order the kernel will use (null, kernel code, kernel data, user data, user code, then the TSS descriptor), the 64-bit task state segment as 104 bytes with accessors, interrupt and trap gates, the 10-byte operand of `lgdt` and `lidt`, and the table of exceptions 0 to 31 with their error codes and classes. Refuses bad values with an error. The kernel builds its tables with it | `cargo xtask check` runs its unit tests (`descriptors/src/tests.rs`) |
 
 ## The boot disk
 
@@ -44,7 +49,8 @@ written without code marks because they exist only after a build:
 
 `cargo xtask test` also lays out one disk per boot scenario under
 target/boot-scenarios, each with the boot stage and its own kernel file, or
-none. One of those kernel files is built to panic on entry.
+none. One of those kernel files is built to panic on entry, and seven more
+each to make one deliberate fault.
 
 ## Building and checking
 
@@ -71,6 +77,7 @@ none. One of those kernel files is built to panic on entry.
 |---|---|
 | `docs/decisions.md` | What has been decided, and why |
 | `docs/boot.md` | How the system starts |
+| `docs/kernel.md` | How the kernel takes over the processor: its segment table, task state segment and interrupt table, what happens on a fault, and the fault scenarios |
 | `docs/handoff.md` | The structure the boot stage hands the kernel: its layout, the kinds of memory, and the firmware type to kind table |
 | `docs/testing.md` | How it is tested, the footprint snapshot, and the planned snapshots |
 | `docs/workflow.md` | Who does what, and the path of a task |

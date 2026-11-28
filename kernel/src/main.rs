@@ -3,16 +3,21 @@
 //! The boot stage maps this ELF file at its addresses, gives it a stack and
 //! jumps to its entry point, the stub `cpu::_start`; the state it is entered
 //! in is written down in `docs/boot.md`, "How the kernel is entered". The
-//! kernel checks what of that state it can, prints one line on the serial
-//! port and stops.
+//! kernel checks what of that state it can, loads its own descriptor tables
+//! in place of the firmware's, prints one line on the serial port and stops.
 
 #![no_std]
 #![no_main]
 
 mod cpu;
+mod deliberate;
 mod entry;
+mod fault;
+mod load;
 mod port;
 mod serial;
+mod takeover;
+mod vectors;
 
 use core::panic::PanicInfo;
 
@@ -38,9 +43,11 @@ extern "sysv64" fn kernel_main(stack_pointer: u64, flags: u64) -> ! {
         serial.write_str("\n");
         stop_failed();
     }
+    takeover::run();
     if cfg!(feature = "panic-at-entry") {
         panic!("the panic-at-entry test feature is on");
     }
+    deliberate::make_if_asked();
     serial::Com1::init().write_str(KERNEL_MESSAGE);
     #[cfg(feature = "qemu-exit")]
     port::qemu_exit(port::KERNEL_SUCCESS);
