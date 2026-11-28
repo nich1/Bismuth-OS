@@ -7,6 +7,13 @@ name = "bismuth-acpi"
 version = "0.0.0"
 
 [[package]]
+name = "bismuth-apic"
+version = "0.0.0"
+dependencies = [
+ "bismuth-acpi",
+]
+
+[[package]]
 name = "bismuth-boot"
 version = "0.0.0"
 dependencies = [
