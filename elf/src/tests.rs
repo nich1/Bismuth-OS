@@ -526,3 +526,20 @@ fn an_empty_table_follows_the_same_bounds_as_any_other() {
         assert_eq!(error(&file), Error::ProgramHeadersOutsideFile);
     }
 }
+
+#[test]
+fn placement_uses_virtual_addresses_not_physical_ones() {
+    let high = |ph: Ph| Ph {
+        address: ph.address - 0x20_0000 + place::KERNEL_BASE,
+        ..ph
+    };
+    let mut file = build(&[high(code()), note(), high(data())]);
+    put64(&mut file, 24, high(code()).address);
+    let elf = Elf::parse(&file).expect("valid");
+    let placement = place::place(&elf).expect("placed");
+    let pages: Vec<_> = placement.segments().iter().map(|p| p.page).collect();
+    assert_eq!(
+        pages,
+        [place::KERNEL_BASE + 0x1000, place::KERNEL_BASE + 0x2000]
+    );
+}
