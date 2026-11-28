@@ -50,7 +50,7 @@ none.
 | Credit check | `tools/check-attribution.sh` | Fails text that credits a tool |
 | Authorship check | `tools/check-history.sh` | Fails commits or pull requests that are not the owner's |
 | Naming check | `tools/check-names.sh` | Fails branch names, commit subjects and titles that do not follow the convention |
-| Workflow check | `tools/check-workflows.sh` | Fails a workflow that re-runs on title or description edits and also runs the boot test |
+| Workflow check | `tools/check-workflows.sh` | Fails a workflow that runs the boot test and also re-runs on title or description edits, or does not set `BISMUTH_REQUIRE_QEMU: 1` (which makes a missing QEMU a failure) |
 | Commit hook | `.githooks/commit-msg` | Runs the credit and naming checks before a commit is made |
 
 ## Documents

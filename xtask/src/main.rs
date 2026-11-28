@@ -592,60 +592,148 @@ fn boot(disk: &str) -> Result<(Option<i32>, String)> {
     Ok((status, serial))
 }
 
-/// Runs every check the pull request pipeline runs.
+/// How a step of `check` that did not pass ended.
+#[derive(Debug)]
+enum Stop {
+    /// The step ran and failed, for this reason.
+    Failed(String),
+    /// The step needs QEMU, which could not be found.
+    QemuMissing,
+}
+
+/// One step of `check`: its name, and what runs it. On success it returns a
+/// note for the step's summary line, empty for none.
+type Step<'a> = (
+    &'static str,
+    Box<dyn FnOnce() -> std::result::Result<String, Stop> + 'a>,
+);
+
+/// What `check` exits with when nothing failed but a step could not run
+/// because QEMU is missing. 1 is a failure and 2 a usage error.
+const CHECK_NOT_RUN_EXIT: u8 = 3;
+
+/// Runs `steps` in order, sending a summary line through `report` as each
+/// one finishes, and a last line saying how the check ended. Returns the
+/// exit code.
+///
+/// The first failing step ends the check; the steps after it do not run. A
+/// step that finds QEMU missing is a failure if `require_qemu`; otherwise the
+/// rest still run, and unless one fails, the last line says what did not run.
+fn run_steps(steps: Vec<Step>, require_qemu: bool, report: &mut dyn FnMut(&str)) -> u8 {
+    let mut not_run = None;
+    for (name, step) in steps {
+        let reason = match step() {
+            Ok(note) if note.is_empty() => {
+                report(&format!("{name}: ok"));
+                continue;
+            }
+            Ok(note) => {
+                report(&format!("{name}: ok, {note}"));
+                continue;
+            }
+            Err(Stop::QemuMissing) if !require_qemu => {
+                report(&format!("{name}: NOT RUN"));
+                not_run.get_or_insert(name);
+                continue;
+            }
+            Err(Stop::QemuMissing) => {
+                "QEMU is not installed and BISMUTH_REQUIRE_QEMU is set".to_string()
+            }
+            Err(Stop::Failed(reason)) => reason,
+        };
+        report(&format!("{name}: FAILED: {reason}"));
+        report(&format!("check FAILED at {name}"));
+        return 1;
+    }
+    match not_run {
+        None => {
+            report("check passed");
+            0
+        }
+        Some(name) => {
+            report(&format!("{name} NOT RUN: QEMU is not installed"));
+            CHECK_NOT_RUN_EXIT
+        }
+    }
+}
+
+/// Turns a step's plain result into a [`Step`] result with no note.
+fn passed(result: Result<()>) -> std::result::Result<String, Stop> {
+    result.map(|()| String::new()).map_err(Stop::Failed)
+}
+
+/// A step that runs `cargo` with `args`.
+fn cargo_step<'a>(name: &'static str, args: Vec<&'static str>) -> Step<'a> {
+    let what = format!("cargo {}", args.join(" "));
+    (
+        name,
+        Box::new(move || passed(run_checked(cargo().args(&args), &what))),
+    )
+}
+
+/// Runs every check the pull request pipeline runs, printing a line per step
+/// and a last line saying how it ended. Exits with [`CHECK_NOT_RUN_EXIT`] if
+/// only the boot test could not run, for lack of QEMU; with
+/// `BISMUTH_REQUIRE_QEMU` set, that is an ordinary failure.
 fn check() -> Result<()> {
-    check_map()?;
-    run_checked(cargo().args(["fmt", "--all", "--check"]), "cargo fmt")?;
-    run_checked(
-        cargo().args(["test", "--package", "xtask"]),
-        "cargo test (xtask)",
-    )?;
-    run_checked(
-        cargo().args(["clippy", "--package", "xtask", "--", "-D", "warnings"]),
-        "cargo clippy (xtask)",
-    )?;
-    for (package, name) in [("bismuth-elf", "elf"), ("bismuth-paging", "paging")] {
-        run_checked(
-            cargo().args(["test", "--package", package]),
-            &format!("cargo test ({name})"),
-        )?;
-        run_checked(
-            cargo().args([
-                "clippy",
-                "--package",
-                package,
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-            ]),
-            &format!("cargo clippy ({name})"),
-        )?;
+    let lints = |package, rest: &[&'static str]| {
+        let mut args = vec!["clippy", "--package", package];
+        args.extend(rest);
+        args.extend(["--", "-D", "warnings"]);
+        args
+    };
+    let steps: Vec<Step> = vec![
+        (
+            "map",
+            Box::new(|| {
+                check_map()
+                    .map(|count| format!("{count} paths"))
+                    .map_err(Stop::Failed)
+            }),
+        ),
+        cargo_step("format", vec!["fmt", "--all", "--check"]),
+        cargo_step("unit tests (xtask)", vec!["test", "--package", "xtask"]),
+        cargo_step("lints (xtask)", lints("xtask", &[])),
+        cargo_step("unit tests (elf)", vec!["test", "--package", "bismuth-elf"]),
+        cargo_step("lints (elf)", lints("bismuth-elf", &["--all-targets"])),
+        cargo_step(
+            "unit tests (paging)",
+            vec!["test", "--package", "bismuth-paging"],
+        ),
+        cargo_step(
+            "lints (paging)",
+            lints("bismuth-paging", &["--all-targets"]),
+        ),
+        cargo_step(
+            "lints (kernel)",
+            lints(KERNEL_PACKAGE, &["--target", KERNEL_TARGET]),
+        ),
+        cargo_step(
+            "lints (boot)",
+            lints(BOOT_PACKAGE, &["--target", UEFI_TARGET]),
+        ),
+        cargo_step(
+            "lints (boot, qemu-exit)",
+            lints(
+                BOOT_PACKAGE,
+                &["--target", UEFI_TARGET, "--features", "qemu-exit"],
+            ),
+        ),
+        ("footprint", Box::new(|| passed(check_snapshot()))),
+        ("kernel file", Box::new(|| passed(check_kernel()))),
+        (
+            "boot test",
+            Box::new(|| match find_qemu() {
+                Ok(_) => passed(test()),
+                Err(_) => Err(Stop::QemuMissing),
+            }),
+        ),
+    ];
+    let require_qemu = env::var("BISMUTH_REQUIRE_QEMU").is_ok_and(|v| !v.is_empty() && v != "0");
+    match run_steps(steps, require_qemu, &mut |line| println!("{line}")) {
+        0 => Ok(()),
+        code => std::process::exit(code.into()),
     }
-    run_checked(
-        cargo()
-            .args([
-                "clippy",
-                "--package",
-                KERNEL_PACKAGE,
-                "--target",
-                KERNEL_TARGET,
-            ])
-            .args(["--", "-D", "warnings"]),
-        "cargo clippy (kernel)",
-    )?;
-    for features in [&[][..], &["--features", "qemu-exit"][..]] {
-        run_checked(
-            cargo()
-                .args(["clippy", "--package", BOOT_PACKAGE, "--target", UEFI_TARGET])
-                .args(features)
-                .args(["--", "-D", "warnings"]),
-            "cargo clippy (boot)",
-        )?;
-    }
-    check_snapshot()?;
-    check_kernel()?;
-    test()
 }
 
 /// A QEMU command set up to boot the folder `disk` through UEFI firmware.
@@ -682,10 +770,15 @@ fn qemu_command(disk: &str) -> Result<Command> {
 }
 
 /// Finds the QEMU program: `BISMUTH_QEMU`, then `PATH`, then the default
-/// Windows install folder.
+/// Windows install folder. A `BISMUTH_QEMU` that names no file counts as no
+/// QEMU, without looking further.
 fn find_qemu() -> Result<PathBuf> {
     if let Some(path) = env::var_os("BISMUTH_QEMU") {
-        return Ok(path.into());
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(format!("BISMUTH_QEMU names {}, not a file", path.display()));
+        }
+        return Ok(path);
     }
     let name = "qemu-system-x86_64";
     let on_path = Command::new(name)
@@ -781,20 +874,23 @@ fn find_firmware() -> Result<Firmware> {
 /// The feature map: what exists, where it lives and how to exercise it.
 const MAP_FILE: &str = "docs/map.md";
 
-/// Fails if the feature map names a file or folder that does not exist.
+/// Fails if the feature map names a file or folder that does not exist, and
+/// otherwise returns how many paths it names.
 ///
 /// A map that points at things that have moved misleads whoever reads it, so
 /// this keeps it from going stale without anyone noticing.
-fn check_map() -> Result<()> {
+fn check_map() -> Result<usize> {
     let root = root();
     let text = fs::read_to_string(root.join(MAP_FILE))
         .map_err(|error| format!("could not read {MAP_FILE}: {error}"))?;
-    let missing: Vec<&str> = paths_in_markdown(&text)
-        .into_iter()
+    let paths = paths_in_markdown(&text);
+    let missing: Vec<&str> = paths
+        .iter()
+        .copied()
         .filter(|path| !root.join(path).exists())
         .collect();
     if missing.is_empty() {
-        Ok(())
+        Ok(paths.len())
     } else {
         Err(format!(
             "{MAP_FILE} names paths that do not exist: {}",
@@ -832,11 +928,12 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        KERNEL_BASE, Scenario, boot_failure, describe_kernel, layout_problems, paths_in_markdown,
-        scenarios,
+        KERNEL_BASE, Scenario, Step, Stop, boot_failure, describe_kernel, layout_problems,
+        paths_in_markdown, run_steps, scenarios,
     };
     use bismuth_elf::FileType::{Executable, SharedObject};
     use bismuth_elf::{Flags, Segment};
+    use std::cell::RefCell;
 
     fn missing() -> Scenario {
         Scenario::error("missing", None, "file not found")
@@ -1063,6 +1160,116 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    /// What a fake step does when it runs.
+    #[derive(Clone, Copy)]
+    enum Fake {
+        Pass,
+        Note,
+        Fail,
+        NoQemu,
+    }
+
+    /// Runs `check`'s step runner on fake steps named `a`, `b`, ... that
+    /// behave as `fakes` says. Returns the lines it reported, the names of
+    /// the steps that ran, and the exit code.
+    fn run_fakes(fakes: &[Fake], require_qemu: bool) -> (Vec<String>, Vec<&'static str>, u8) {
+        const NAMES: [&str; 4] = ["a", "b", "c", "d"];
+        let ran = RefCell::new(Vec::new());
+        let steps: Vec<Step> = fakes
+            .iter()
+            .zip(NAMES)
+            .map(|(&fake, name)| -> Step {
+                let ran = &ran;
+                let step = move || {
+                    ran.borrow_mut().push(name);
+                    match fake {
+                        Fake::Pass => Ok(String::new()),
+                        Fake::Note => Ok("3 things".to_string()),
+                        Fake::Fail => Err(Stop::Failed(format!("{name} broke"))),
+                        Fake::NoQemu => Err(Stop::QemuMissing),
+                    }
+                };
+                (name, Box::new(step))
+            })
+            .collect();
+        let mut lines = Vec::new();
+        let code = run_steps(steps, require_qemu, &mut |line| {
+            lines.push(line.to_string())
+        });
+        (lines, ran.into_inner(), code)
+    }
+
+    #[test]
+    fn a_check_where_every_step_passes_ends_with_check_passed() {
+        let (lines, ran, code) = run_fakes(&[Fake::Pass, Fake::Note, Fake::Pass], false);
+        assert_eq!(lines, ["a: ok", "b: ok, 3 things", "c: ok", "check passed"]);
+        assert_eq!(ran, ["a", "b", "c"]);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn a_check_stops_at_the_first_failing_step_and_names_it() {
+        for (at, name) in ["a", "b", "c"].into_iter().enumerate() {
+            let mut fakes = [Fake::Pass; 3];
+            fakes[at] = Fake::Fail;
+            let (lines, ran, code) = run_fakes(&fakes, false);
+            let mut expected: Vec<String> = ran[..at].iter().map(|n| format!("{n}: ok")).collect();
+            expected.push(format!("{name}: FAILED: {name} broke"));
+            expected.push(format!("check FAILED at {name}"));
+            assert_eq!(lines, expected);
+            // The steps after the failing one do not run.
+            assert_eq!(ran, ["a", "b", "c"][..=at]);
+            assert_eq!(code, 1);
+        }
+    }
+
+    #[test]
+    fn a_check_without_qemu_runs_the_rest_and_ends_not_run() {
+        let (lines, ran, code) = run_fakes(&[Fake::Pass, Fake::NoQemu, Fake::Pass], false);
+        assert_eq!(
+            lines,
+            [
+                "a: ok",
+                "b: NOT RUN",
+                "c: ok",
+                "b NOT RUN: QEMU is not installed"
+            ]
+        );
+        assert_eq!(ran, ["a", "b", "c"]);
+        assert_eq!(code, 3);
+    }
+
+    #[test]
+    fn a_check_without_qemu_fails_when_qemu_is_required() {
+        let (lines, ran, code) = run_fakes(&[Fake::Pass, Fake::NoQemu, Fake::Pass], true);
+        assert_eq!(
+            lines,
+            [
+                "a: ok",
+                "b: FAILED: QEMU is not installed and BISMUTH_REQUIRE_QEMU is set",
+                "check FAILED at b"
+            ]
+        );
+        assert_eq!(ran, ["a", "b"]);
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_failure_wins_over_missing_qemu() {
+        // A failure before the step that needs QEMU: that step never runs.
+        let (lines, ran, code) = run_fakes(&[Fake::Fail, Fake::NoQemu], false);
+        assert_eq!(lines, ["a: FAILED: a broke", "check FAILED at a"]);
+        assert_eq!(ran, ["a"]);
+        assert_eq!(code, 1);
+        // A failure after it still ends the check as failed.
+        let (lines, _, code) = run_fakes(&[Fake::NoQemu, Fake::Fail], false);
+        assert_eq!(
+            lines,
+            ["a: NOT RUN", "b: FAILED: b broke", "check FAILED at b"]
+        );
+        assert_eq!(code, 1);
     }
 
     #[test]

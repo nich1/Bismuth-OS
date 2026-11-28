@@ -41,7 +41,8 @@ one holds.
 
 7. **Document.** If something was added or moved, hand the `explainer` agent
    the change.
-   *Check:* `cargo xtask check` passes, which includes the feature map.
+   *Check:* the last line of `cargo xtask check` is `check passed`, and the
+   step lines above it include `map: ok`.
 
 8. **Open the pull request.** Use the `open-pr` skill.
    *Check:* the pull request exists and its checks are running.
