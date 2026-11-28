@@ -9,12 +9,12 @@ agent and the pull request checks all run exactly the same thing.
 | Layer | What it catches | When it runs | Status |
 |---|---|---|---|
 | Compiler and lints | Type errors, undocumented unsafe code | Every build | In place |
-| Unit tests on the development machine | Logic bugs in code that needs no hardware | Every pull request | In place for `xtask` and the ELF reader; the kernel follows |
-| Boot scenarios in QEMU | The system not working end to end | Every pull request | Five scenarios, below |
+| Unit tests on the development machine | Logic bugs in code that needs no hardware | Every pull request | In place for `xtask`, every library, and the parts of the boot stage and the kernel that need no hardware |
+| Boot scenarios in QEMU | The system not working end to end | Every pull request | Twenty-one scenarios, below |
 | Before-and-after snapshots | Growth nobody explained | Every pull request | One snapshot, footprint; the rest planned |
 | Mutation testing | Tests that still pass when the code is broken | Nightly, and on changed code | Planned, once the kernel has unit tests |
 | Miri | Undefined behaviour in unsafe code | Every pull request | Planned, with the first unsafe data structure |
-| Fuzzing | Crashes on hostile input | Nightly | Planned. The first parser, the ELF reader, has a fixed-seed mutation test among its unit tests |
+| Fuzzing | Crashes on hostile input | Nightly | Planned. The ELF reader, the hand-off reader and the ACPI reader each have a fixed-seed corruption test among their unit tests |
 | Proofs | Core rules holding for every possible input | Every pull request that touches the core | Planned, with the memory manager |
 | Benchmarks with thresholds | Slowdowns | Every pull request | Planned, once there is something to measure |
 | A run on real hardware | Whatever QEMU hides | At milestones | Planned |
@@ -24,24 +24,39 @@ fails.
 
 ## Boot scenarios
 
-`cargo xtask test` builds the boot stage with the `qemu-exit` feature and
-boots it in QEMU once per scenario, each on its own disk under
-`target/boot-scenarios`. Each must print `BISMUTH BOOT OK` and then its own
-line about the kernel file on the serial port, and QEMU must exit with the
-expected code within two minutes:
+`cargo xtask test` builds the boot stage and the kernel with their
+`qemu-exit` features, and a few more boot stage and kernel files built to
+fail on purpose, then boots QEMU once per scenario, each on its own disk
+under `target/boot-scenarios`. Each must print `BISMUTH BOOT OK` and then
+its own lines on the serial port, in order, and QEMU must exit with the
+expected code within two minutes. The expected lines are worked out from
+the same kernel file on the development machine: its entry point, its
+segments, its size and the checksum of its pages.
 
-| Scenario | Kernel file on the disk | Expected line | Exit code |
-|---|---|---|---|
-| normal | The real kernel | `BISMUTH KERNEL FILE OK entry=0x<hex> segments=<n> bytes=<n>`, with the values the ELF reader finds in the same file on the development machine | 33 |
-| missing | None | `BISMUTH KERNEL FILE ERROR: file not found` | 35 |
-| empty | Zero bytes | `BISMUTH KERNEL FILE ERROR: file is empty` | 35 |
-| bad-signature | The real kernel with its second byte changed | `BISMUTH KERNEL FILE ERROR: ELF reader: BadSignature` | 35 |
-| truncated | The real kernel cut in the middle of its last program header | `BISMUTH KERNEL FILE ERROR: ELF reader: ProgramHeadersOutsideFile` | 35 |
+There are twenty-one scenarios: a good boot, kernel files that are missing,
+empty, damaged or cannot be placed, a processor without no-execute pages, a
+kernel that panics, a damaged hand-off structure, and seven deliberate
+faults. `docs/boot.md`, "How it is tested", lists them with their lines,
+and `docs/kernel.md` describes the fault scenarios.
 
-Exit code 33 means the boot stage read and checked the kernel file; 35 means
-it reported a failure. Both come from the `isa-debug-exit` device, so a
-failing scenario ends in seconds instead of waiting for the time limit. All
-scenarios run even when one fails, and each prints its name, time and lines.
+Exit code 65 means the kernel ran and printed its line, 67 that it
+panicked, refused its entry state or the hand-off structure, or reported
+a fault; 35 means the boot stage reported a failure. All come from the
+`isa-debug-exit` device, so a failing scenario ends in seconds instead of
+waiting for the time limit. All scenarios run even when one fails, and
+each prints its name, time and lines.
+
+## The kernel file
+
+Two steps of `cargo xtask check` look at the kernel file itself:
+
+- `kernel file` runs the ELF reader and the placement rules on the lean
+  kernel file on the boot disk, and checks that it loads the same pages as
+  the full file kept next to the build (`docs/boot.md`, "The kernel file").
+- `reproducible kernel file` builds the kernel again in a copy of the
+  repository in the system's temporary folder, and fails unless the
+  linker's file, the full file and the lean file are the same bytes as the
+  ones built here. It takes a few seconds.
 
 ## Rules
 
@@ -76,13 +91,21 @@ The report is sorted `key: value` lines. Today it holds:
 
 - `boot image bytes`: the size of the built boot image, `BOOTX64.EFI`, the
   file the firmware loads.
+- `kernel file bytes` and `kernel loaded pages`: the size of the lean
+  kernel file the boot stage reads, `KERNEL.ELF`, and how many pages its
+  segments take once placed, for the kernel built without test features.
 - `third-party packages`: how many packages in `Cargo.lock` come from outside
   the repository. The project has no dependencies, so this is 0.
-- `unsafe blocks in <file>` and `unsafe fn declarations in <file>`: for each
-  Rust file under `boot/src`, `kernel/src`, `elf/src` and `paging/src`, how many `unsafe { ... }` blocks and
-  `unsafe fn` declarations it contains. `unsafe` marks code the compiler
-  cannot check for memory safety, so its count is a rough measure of how much
-  code has to be trusted by hand.
+- `unsafe blocks in <file>`, `unsafe fn declarations in <file>`,
+  `unsafe attributes in <file>`, `unsafe extern blocks in <file>` and
+  `unsafe impls in <file>`: for each Rust file under `boot/src`,
+  `kernel/src`, `acpi/src`, `apic/src`, `descriptors/src`, `elf/src`,
+  `frames/src`, `handoff/src`, `nvme/src`, `paging/src` and `pci/src`,
+  how many `unsafe { ... }` blocks, `unsafe fn` declarations, `#[unsafe(...)]`
+  attributes (such as `#[unsafe(no_mangle)]` and `#[unsafe(naked)]`),
+  `unsafe extern` blocks and `unsafe impl`s it contains. `unsafe` marks code
+  the compiler cannot check for memory safety, so its count is a rough
+  measure of how much code has to be trusted by hand.
 
 `cargo xtask check` builds the image again, makes the report and compares it
 with the stored one before it runs the boot test. If they differ, the check
@@ -104,9 +127,7 @@ Limits to know about:
 - The boot image is padded to a multiple of 512 bytes, so its size only
   changes in steps of 512. Growth smaller than that can go unseen. The unsafe
   counts do not have this limit.
-- Only `unsafe { ... }` blocks and `unsafe fn` declarations are counted.
-  `unsafe impl`, `unsafe extern` blocks and `#[unsafe(...)]` attributes are
-  not.
+- `unsafe trait` declarations are not counted; there are none yet.
 - The counter reads source text, so `unsafe` written out by a macro (a piece
   of code that generates code) is not seen.
 - Planned: the work needed to reach the first line of output. It is not

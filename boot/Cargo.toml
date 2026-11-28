@@ -10,11 +10,15 @@ publish.workspace = true
 # Ask QEMU to exit once the boot message is out. Only the automated boot test
 # turns this on; it must stay off for real hardware.
 qemu-exit = []
+# Damage the hand-off structure's marker after writing it, so the boot test
+# can check that the kernel refuses it. Only the boot test turns this on.
+damage-handoff = []
 
 [dependencies]
 # Part of this repository, not a third-party package.
 bismuth-elf = { path = "../elf" }
 bismuth-paging = { path = "../paging" }
+bismuth-handoff = { path = "../handoff" }
 
 [lints]
 workspace = true

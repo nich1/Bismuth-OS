@@ -1,0 +1,10 @@
+[package]
+name = "bismuth-handoff"
+description = "Writes and reads the structure the boot stage hands the kernel: Bismuth's own memory map"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

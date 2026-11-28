@@ -3,19 +3,52 @@
 version = 4
 
 [[package]]
+name = "bismuth-acpi"
+version = "0.0.0"
+
+[[package]]
+name = "bismuth-apic"
+version = "0.0.0"
+dependencies = [
+ "bismuth-acpi",
+]
+
+[[package]]
 name = "bismuth-boot"
 version = "0.0.0"
 dependencies = [
  "bismuth-elf",
+ "bismuth-handoff",
  "bismuth-paging",
 ]
+
+[[package]]
+name = "bismuth-descriptors"
+version = "0.0.0"
 
 [[package]]
 name = "bismuth-elf"
 version = "0.0.0"
 
 [[package]]
+name = "bismuth-frames"
+version = "0.0.0"
+
+[[package]]
+name = "bismuth-handoff"
+version = "0.0.0"
+
+[[package]]
 name = "bismuth-kernel"
+version = "0.0.0"
+dependencies = [
+ "bismuth-descriptors",
+ "bismuth-elf",
+ "bismuth-handoff",
+]
+
+[[package]]
+name = "bismuth-nvme"
 version = "0.0.0"
 
 [[package]]
@@ -23,9 +56,18 @@ name = "bismuth-paging"
 version = "0.0.0"
 
 [[package]]
+name = "bismuth-pci"
+version = "0.0.0"
+dependencies = [
+ "bismuth-acpi",
+]
+
+[[package]]
 name = "xtask"
 version = "0.0.0"
 dependencies = [
+ "bismuth-descriptors",
  "bismuth-elf",
+ "bismuth-handoff",
  "bismuth-paging",
 ]

@@ -1,25 +1,146 @@
-boot image bytes: 106496
+boot image bytes: 176128
+kernel file bytes: 55162
+kernel loaded pages: 29
 third-party packages: 0
-unsafe blocks in boot/src/cpu.rs: 7
+unsafe attributes in acpi/src/lib.rs: 0
+unsafe attributes in acpi/src/tests.rs: 0
+unsafe attributes in apic/src/lib.rs: 0
+unsafe attributes in apic/src/tests.rs: 0
+unsafe attributes in boot/src/cpu.rs: 0
+unsafe attributes in boot/src/handoff.rs: 0
+unsafe attributes in boot/src/leave.rs: 0
+unsafe attributes in boot/src/load.rs: 0
+unsafe attributes in boot/src/main.rs: 1
+unsafe attributes in boot/src/map.rs: 0
+unsafe attributes in boot/src/memory.rs: 0
+unsafe attributes in boot/src/port.rs: 0
+unsafe attributes in boot/src/report.rs: 0
+unsafe attributes in boot/src/serial.rs: 0
+unsafe attributes in boot/src/uefi.rs: 0
+unsafe attributes in boot/src/uefi/boot_services.rs: 0
+unsafe attributes in boot/src/uefi/file.rs: 0
+unsafe attributes in descriptors/src/lib.rs: 0
+unsafe attributes in descriptors/src/tests.rs: 0
+unsafe attributes in elf/src/lib.rs: 0
+unsafe attributes in elf/src/place.rs: 0
+unsafe attributes in elf/src/place/tests.rs: 0
+unsafe attributes in elf/src/tests.rs: 0
+unsafe attributes in frames/src/lib.rs: 0
+unsafe attributes in frames/src/tests.rs: 0
+unsafe attributes in handoff/src/lib.rs: 0
+unsafe attributes in handoff/src/tests.rs: 0
+unsafe attributes in kernel/src/cpu.rs: 2
+unsafe attributes in kernel/src/deliberate.rs: 0
+unsafe attributes in kernel/src/entry.rs: 0
+unsafe attributes in kernel/src/fault.rs: 0
+unsafe attributes in kernel/src/handoff.rs: 0
+unsafe attributes in kernel/src/load.rs: 0
+unsafe attributes in kernel/src/main.rs: 0
+unsafe attributes in kernel/src/port.rs: 0
+unsafe attributes in kernel/src/serial.rs: 0
+unsafe attributes in kernel/src/takeover.rs: 0
+unsafe attributes in kernel/src/vectors.rs: 0
+unsafe attributes in nvme/src/lib.rs: 0
+unsafe attributes in nvme/src/tests.rs: 0
+unsafe attributes in paging/src/lib.rs: 0
+unsafe attributes in paging/src/tests.rs: 0
+unsafe attributes in pci/src/lib.rs: 0
+unsafe attributes in pci/src/tests.rs: 0
+unsafe blocks in acpi/src/lib.rs: 0
+unsafe blocks in acpi/src/tests.rs: 0
+unsafe blocks in apic/src/lib.rs: 0
+unsafe blocks in apic/src/tests.rs: 0
+unsafe blocks in boot/src/cpu.rs: 9
+unsafe blocks in boot/src/handoff.rs: 0
+unsafe blocks in boot/src/leave.rs: 0
 unsafe blocks in boot/src/load.rs: 0
-unsafe blocks in boot/src/main.rs: 4
+unsafe blocks in boot/src/main.rs: 5
 unsafe blocks in boot/src/map.rs: 4
-unsafe blocks in boot/src/memory.rs: 3
+unsafe blocks in boot/src/memory.rs: 5
 unsafe blocks in boot/src/port.rs: 3
 unsafe blocks in boot/src/report.rs: 0
 unsafe blocks in boot/src/serial.rs: 3
 unsafe blocks in boot/src/uefi.rs: 2
-unsafe blocks in boot/src/uefi/boot_services.rs: 6
+unsafe blocks in boot/src/uefi/boot_services.rs: 10
 unsafe blocks in boot/src/uefi/file.rs: 13
+unsafe blocks in descriptors/src/lib.rs: 0
+unsafe blocks in descriptors/src/tests.rs: 0
 unsafe blocks in elf/src/lib.rs: 0
 unsafe blocks in elf/src/place.rs: 0
 unsafe blocks in elf/src/place/tests.rs: 0
 unsafe blocks in elf/src/tests.rs: 0
-unsafe blocks in kernel/src/cpu.rs: 1
-unsafe blocks in kernel/src/main.rs: 0
+unsafe blocks in frames/src/lib.rs: 0
+unsafe blocks in frames/src/tests.rs: 0
+unsafe blocks in handoff/src/lib.rs: 0
+unsafe blocks in handoff/src/tests.rs: 0
+unsafe blocks in kernel/src/cpu.rs: 5
+unsafe blocks in kernel/src/deliberate.rs: 6
+unsafe blocks in kernel/src/entry.rs: 0
+unsafe blocks in kernel/src/fault.rs: 0
+unsafe blocks in kernel/src/handoff.rs: 1
+unsafe blocks in kernel/src/load.rs: 5
+unsafe blocks in kernel/src/main.rs: 1
+unsafe blocks in kernel/src/port.rs: 3
+unsafe blocks in kernel/src/serial.rs: 3
+unsafe blocks in kernel/src/takeover.rs: 5
+unsafe blocks in kernel/src/vectors.rs: 2
+unsafe blocks in nvme/src/lib.rs: 0
+unsafe blocks in nvme/src/tests.rs: 0
 unsafe blocks in paging/src/lib.rs: 0
 unsafe blocks in paging/src/tests.rs: 0
-unsafe fn declarations in boot/src/cpu.rs: 2
+unsafe blocks in pci/src/lib.rs: 0
+unsafe blocks in pci/src/tests.rs: 0
+unsafe extern blocks in acpi/src/lib.rs: 0
+unsafe extern blocks in acpi/src/tests.rs: 0
+unsafe extern blocks in apic/src/lib.rs: 0
+unsafe extern blocks in apic/src/tests.rs: 0
+unsafe extern blocks in boot/src/cpu.rs: 0
+unsafe extern blocks in boot/src/handoff.rs: 0
+unsafe extern blocks in boot/src/leave.rs: 0
+unsafe extern blocks in boot/src/load.rs: 0
+unsafe extern blocks in boot/src/main.rs: 0
+unsafe extern blocks in boot/src/map.rs: 0
+unsafe extern blocks in boot/src/memory.rs: 0
+unsafe extern blocks in boot/src/port.rs: 0
+unsafe extern blocks in boot/src/report.rs: 0
+unsafe extern blocks in boot/src/serial.rs: 0
+unsafe extern blocks in boot/src/uefi.rs: 0
+unsafe extern blocks in boot/src/uefi/boot_services.rs: 0
+unsafe extern blocks in boot/src/uefi/file.rs: 0
+unsafe extern blocks in descriptors/src/lib.rs: 0
+unsafe extern blocks in descriptors/src/tests.rs: 0
+unsafe extern blocks in elf/src/lib.rs: 0
+unsafe extern blocks in elf/src/place.rs: 0
+unsafe extern blocks in elf/src/place/tests.rs: 0
+unsafe extern blocks in elf/src/tests.rs: 0
+unsafe extern blocks in frames/src/lib.rs: 0
+unsafe extern blocks in frames/src/tests.rs: 0
+unsafe extern blocks in handoff/src/lib.rs: 0
+unsafe extern blocks in handoff/src/tests.rs: 0
+unsafe extern blocks in kernel/src/cpu.rs: 0
+unsafe extern blocks in kernel/src/deliberate.rs: 0
+unsafe extern blocks in kernel/src/entry.rs: 0
+unsafe extern blocks in kernel/src/fault.rs: 0
+unsafe extern blocks in kernel/src/handoff.rs: 0
+unsafe extern blocks in kernel/src/load.rs: 0
+unsafe extern blocks in kernel/src/main.rs: 0
+unsafe extern blocks in kernel/src/port.rs: 0
+unsafe extern blocks in kernel/src/serial.rs: 0
+unsafe extern blocks in kernel/src/takeover.rs: 0
+unsafe extern blocks in kernel/src/vectors.rs: 1
+unsafe extern blocks in nvme/src/lib.rs: 0
+unsafe extern blocks in nvme/src/tests.rs: 0
+unsafe extern blocks in paging/src/lib.rs: 0
+unsafe extern blocks in paging/src/tests.rs: 0
+unsafe extern blocks in pci/src/lib.rs: 0
+unsafe extern blocks in pci/src/tests.rs: 0
+unsafe fn declarations in acpi/src/lib.rs: 0
+unsafe fn declarations in acpi/src/tests.rs: 0
+unsafe fn declarations in apic/src/lib.rs: 0
+unsafe fn declarations in apic/src/tests.rs: 0
+unsafe fn declarations in boot/src/cpu.rs: 3
+unsafe fn declarations in boot/src/handoff.rs: 0
+unsafe fn declarations in boot/src/leave.rs: 0
 unsafe fn declarations in boot/src/load.rs: 0
 unsafe fn declarations in boot/src/main.rs: 1
 unsafe fn declarations in boot/src/map.rs: 0
@@ -30,11 +151,74 @@ unsafe fn declarations in boot/src/serial.rs: 0
 unsafe fn declarations in boot/src/uefi.rs: 1
 unsafe fn declarations in boot/src/uefi/boot_services.rs: 2
 unsafe fn declarations in boot/src/uefi/file.rs: 1
+unsafe fn declarations in descriptors/src/lib.rs: 0
+unsafe fn declarations in descriptors/src/tests.rs: 0
 unsafe fn declarations in elf/src/lib.rs: 0
 unsafe fn declarations in elf/src/place.rs: 0
 unsafe fn declarations in elf/src/place/tests.rs: 0
 unsafe fn declarations in elf/src/tests.rs: 0
-unsafe fn declarations in kernel/src/cpu.rs: 0
+unsafe fn declarations in frames/src/lib.rs: 0
+unsafe fn declarations in frames/src/tests.rs: 0
+unsafe fn declarations in handoff/src/lib.rs: 0
+unsafe fn declarations in handoff/src/tests.rs: 0
+unsafe fn declarations in kernel/src/cpu.rs: 1
+unsafe fn declarations in kernel/src/deliberate.rs: 0
+unsafe fn declarations in kernel/src/entry.rs: 0
+unsafe fn declarations in kernel/src/fault.rs: 0
+unsafe fn declarations in kernel/src/handoff.rs: 1
+unsafe fn declarations in kernel/src/load.rs: 5
 unsafe fn declarations in kernel/src/main.rs: 0
+unsafe fn declarations in kernel/src/port.rs: 2
+unsafe fn declarations in kernel/src/serial.rs: 0
+unsafe fn declarations in kernel/src/takeover.rs: 0
+unsafe fn declarations in kernel/src/vectors.rs: 0
+unsafe fn declarations in nvme/src/lib.rs: 0
+unsafe fn declarations in nvme/src/tests.rs: 0
 unsafe fn declarations in paging/src/lib.rs: 0
 unsafe fn declarations in paging/src/tests.rs: 0
+unsafe fn declarations in pci/src/lib.rs: 0
+unsafe fn declarations in pci/src/tests.rs: 0
+unsafe impls in acpi/src/lib.rs: 0
+unsafe impls in acpi/src/tests.rs: 0
+unsafe impls in apic/src/lib.rs: 0
+unsafe impls in apic/src/tests.rs: 0
+unsafe impls in boot/src/cpu.rs: 0
+unsafe impls in boot/src/handoff.rs: 0
+unsafe impls in boot/src/leave.rs: 0
+unsafe impls in boot/src/load.rs: 0
+unsafe impls in boot/src/main.rs: 0
+unsafe impls in boot/src/map.rs: 0
+unsafe impls in boot/src/memory.rs: 0
+unsafe impls in boot/src/port.rs: 0
+unsafe impls in boot/src/report.rs: 0
+unsafe impls in boot/src/serial.rs: 0
+unsafe impls in boot/src/uefi.rs: 0
+unsafe impls in boot/src/uefi/boot_services.rs: 0
+unsafe impls in boot/src/uefi/file.rs: 0
+unsafe impls in descriptors/src/lib.rs: 0
+unsafe impls in descriptors/src/tests.rs: 0
+unsafe impls in elf/src/lib.rs: 0
+unsafe impls in elf/src/place.rs: 0
+unsafe impls in elf/src/place/tests.rs: 0
+unsafe impls in elf/src/tests.rs: 0
+unsafe impls in frames/src/lib.rs: 0
+unsafe impls in frames/src/tests.rs: 0
+unsafe impls in handoff/src/lib.rs: 0
+unsafe impls in handoff/src/tests.rs: 0
+unsafe impls in kernel/src/cpu.rs: 0
+unsafe impls in kernel/src/deliberate.rs: 0
+unsafe impls in kernel/src/entry.rs: 0
+unsafe impls in kernel/src/fault.rs: 0
+unsafe impls in kernel/src/handoff.rs: 0
+unsafe impls in kernel/src/load.rs: 0
+unsafe impls in kernel/src/main.rs: 0
+unsafe impls in kernel/src/port.rs: 0
+unsafe impls in kernel/src/serial.rs: 0
+unsafe impls in kernel/src/takeover.rs: 1
+unsafe impls in kernel/src/vectors.rs: 0
+unsafe impls in nvme/src/lib.rs: 0
+unsafe impls in nvme/src/tests.rs: 0
+unsafe impls in paging/src/lib.rs: 0
+unsafe impls in paging/src/tests.rs: 0
+unsafe impls in pci/src/lib.rs: 0
+unsafe impls in pci/src/tests.rs: 0
