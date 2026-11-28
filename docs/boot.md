@@ -448,8 +448,9 @@ the kernel: both files therefore keep that table at the same offset, just
 after the segments, and are the same bytes up to it. They load the same
 pages, which `cargo xtask check` checks on the real files.
 
-The kernel's bytes depend only on its source, its build settings and the
-compiler. The compiler records the folder it ran in, in the debug
+The kernel's bytes depend on its source, its build settings, the compiler
+and, as the end of this paragraph explains, the operating system it is
+built on, but not on the folder. The compiler records the folder it ran in, in the debug
 information, so `cargo xtask` builds the kernel with
 `--remap-path-prefix=<folder>=.`, which writes `.` instead. Paths in the
 kernel's panic messages are already relative to the repository, or under

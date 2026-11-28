@@ -342,7 +342,8 @@ fn split_kernel(linked: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     // The moved sections lie after the loaded contents and, as the linker
     // writes them, share no bytes, so together they take at most what
     // follows. A file whose sections take more would make the full file
-    // that many times larger than itself.
+    // that many times larger than itself. This bounds the sections' bytes;
+    // padding of up to a page before each section comes on top.
     let (room, mut taken) = (linked.len() - loaded, 0);
     for index in std::iter::once(names).chain((0..sections).filter(|&i| i != names)) {
         let header = table + 64 * index;
