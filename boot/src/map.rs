@@ -1,13 +1,18 @@
 //! Gives the kernel its addresses: builds new address tables that keep
 //! everything the firmware mapped and add each copied segment at its kernel
-//! address with its own permissions, and the kernel's stack below them,
-//! switches the processor to them while boot services still run, and
-//! proves the kernel is there by walking the tables in use and reading
-//! every byte back through the kernel addresses, and that the stack is
-//! there with its guard page missing. Safe code over `cpu` and `memory`.
+//! address with its own permissions, the kernel's stack below them and the
+//! hand-off window below the stack, read-only, switches the processor to
+//! them while boot services still run, and proves the kernel is there by
+//! walking the tables in use and reading every byte back through the
+//! kernel addresses, that the stack is there with its guard page missing,
+//! and that the window is there, read-only. Safe code over `cpu` and
+//! `memory`.
 
 use bismuth_elf::Flags;
-use bismuth_elf::place::{Fnv1a, MAX_SEGMENTS, PAGE_LIMIT, STACK_BOTTOM, STACK_GUARD, STACK_PAGES};
+use bismuth_elf::place::{
+    Fnv1a, HANDOFF_ADDRESS, HANDOFF_PAGES, MAX_SEGMENTS, STACK_BOTTOM, STACK_GUARD, STACK_PAGES,
+    TABLE_FRAMES,
+};
 use bismuth_paging::{self as paging, PAGE_SIZE, Permissions, PhysicalMemory};
 
 use crate::cpu;
@@ -15,17 +20,6 @@ use crate::load::Kernel;
 use crate::memory::{self, Frames};
 use crate::report::{MapFailure, PlaceFailure};
 use crate::uefi::BootServices;
-
-/// Frames enough for any kernel the placement rules accept, which lies in
-/// the top 2 GiB, and its stack: the top-level table, one directory-pointer
-/// table, two directories for the kernel (each covers 1 GiB), and a
-/// last-level table for each 2 MiB a segment touches. A segment of `p`
-/// pages touches at most `p / 512 + 2` of those, and the segments take at
-/// most `PAGE_LIMIT` pages together. The stack and its guard page lie in
-/// the 2 MiB just below the kernel's 2 GiB, in the 1 GiB below them, so
-/// they take one directory and one last-level table more, shared with no
-/// segment. In all, 4 + 16384 / 512 + 2 * 8 + 2 = 54 frames.
-const TABLE_FRAMES: u64 = 4 + PAGE_LIMIT / 512 + 2 * MAX_SEGMENTS as u64 + 2;
 
 /// What the stack's pages allow: reading and writing, never running code.
 const STACK: Permissions = Permissions {
@@ -35,6 +29,12 @@ const STACK: Permissions = Permissions {
 // The stack must be writable and must not run code; `check_stack` holds the
 // tables to the same rule on its own.
 const _: () = assert!(STACK.write && !STACK.execute);
+
+/// What the hand-off window allows the kernel: reading only.
+const HANDOFF: Permissions = Permissions {
+    write: false,
+    execute: false,
+};
 
 /// The top-level entry for the top 512 GiB, where the kernel goes.
 const KERNEL_ENTRY: usize = 511;
@@ -53,6 +53,15 @@ pub struct Placed {
     count: usize,
     /// Whether `CR0.WP` is set, so ring 0 cannot write read-only pages.
     pub write_protect: bool,
+    /// The physical address of the stack's first page.
+    pub stack: u64,
+    /// The physical address of the block of table frames, which has
+    /// `TABLE_FRAMES` pages.
+    pub tables: u64,
+    /// The hand-off structure's pages, cleared, at their physical address
+    /// (the firmware's mappings keep that), which the tables also map
+    /// read-only at `HANDOFF_ADDRESS`.
+    pub handoff: &'static mut [u8],
 }
 
 impl Placed {
@@ -72,15 +81,24 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
         return Err(MapFailure::NoExecuteUnsupported);
     }
     let mut frames = Frames::new(boot_services, TABLE_FRAMES)?;
+    let status = |failure| match failure {
+        PlaceFailure::Firmware { status, .. } => Some(status),
+        _ => None,
+    };
     // Loader data, like the segments' pages, cleared and never freed.
     let (stack, _) = boot_services
         .allocate_pages(STACK_PAGES, 0)
         .map_err(|failure| MapFailure::NoStack {
-            status: match failure {
-                PlaceFailure::Firmware { status, .. } => Some(status),
-                _ => None,
-            },
+            status: status(failure),
         })?;
+    // The same, for the hand-off structure, which is written only after
+    // boot services end: allocating then would be too late.
+    let (handoff_physical, handoff) =
+        boot_services
+            .allocate_pages(HANDOFF_PAGES, 0)
+            .map_err(|failure| MapFailure::NoHandoffPages {
+                status: status(failure),
+            })?;
     let root = frames.root();
     let firmware = cpu::cr3();
     // SAFETY: `firmware` was just read from CR3, and boot services run.
@@ -130,6 +148,16 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
         STACK,
     )
     .map_err(|error| MapFailure::StackMap { error })?;
+    // Eight pages below the stack's guard page, in the stack's 2 MiB.
+    paging::map(
+        &mut frames,
+        root,
+        HANDOFF_ADDRESS,
+        handoff_physical,
+        HANDOFF_PAGES * PAGE_SIZE,
+        HANDOFF,
+    )
+    .map_err(|error| MapFailure::HandoffMap { error })?;
     // SAFETY: `root` is a 4 KiB-aligned frame below 2^52 (`Frames::new`).
     // It holds the firmware's 512 top-level entries, so everything mapped
     // before, this program and the firmware among it, translates as
@@ -143,12 +171,39 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
     // mappings valid, as they must for the firmware's tables, and leave
     // entry 511, which the firmware did not use, alone. The walk below
     // checks the kernel's and the stack's mappings after any such edits.
-    // The stack's pages are like the segments': loader data, never freed,
-    // mapped only under entry 511, and not used by anything yet.
+    // The stack's pages and the hand-off pages are like the segments':
+    // loader data, never freed, mapped only under entry 511 (besides the
+    // firmware's own mapping of all memory), and not used by anything yet.
     unsafe { cpu::set_cr3(firmware & !cpu::CR3_ADDRESS | root) }
-    let placed = check(&mut frames, kernel)?;
+    let mut placed = check(&mut frames, kernel, handoff)?;
     check_stack(&mut frames, stack)?;
+    check_handoff(&mut frames, handoff_physical)?;
+    placed.stack = stack;
+    placed.tables = frames.root();
     Ok(placed)
+}
+
+/// Walks the tables in use for every page of the hand-off window, whose
+/// first page is at physical address `handoff`: each must lead to its own
+/// frame, read-only and not executable, the rule stated here as for the
+/// stack.
+fn check_handoff(frames: &mut Frames, handoff: u64) -> Result<(), MapFailure> {
+    let live = cpu::cr3() & cpu::CR3_ADDRESS;
+    for page in 0..HANDOFF_PAGES {
+        let address = HANDOFF_ADDRESS + page * PAGE_SIZE;
+        let expected = handoff + page * PAGE_SIZE;
+        let found = paging::translate(frames, live, address);
+        let good = matches!(found, Some((frame, Permissions { write: false, execute: false }))
+            if frame == expected);
+        if !good {
+            return Err(MapFailure::HandoffWalk {
+                address,
+                found,
+                expected,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Walks the tables in use for every page of the stack, whose first page
@@ -183,7 +238,11 @@ fn check_stack(frames: &mut Frames, stack: u64) -> Result<(), MapFailure> {
 
 /// Walks the tables in use for every page of every segment, then reads the
 /// segments back through their kernel addresses.
-fn check(frames: &mut Frames, kernel: &Kernel) -> Result<Placed, MapFailure> {
+fn check(
+    frames: &mut Frames,
+    kernel: &Kernel,
+    handoff: &'static mut [u8],
+) -> Result<Placed, MapFailure> {
     let live = cpu::cr3() & cpu::CR3_ADDRESS;
     let mut placed = Placed {
         sum: 0,
@@ -193,6 +252,9 @@ fn check(frames: &mut Frames, kernel: &Kernel) -> Result<Placed, MapFailure> {
         }; MAX_SEGMENTS],
         count: 0,
         write_protect: cpu::cr0() & cpu::CR0_WP != 0,
+        stack: 0,
+        tables: 0,
+        handoff,
     };
     let mut sum = Fnv1a::new();
     for ((segment, loaded), slot) in kernel.segments().enumerate().zip(&mut placed.permissions) {

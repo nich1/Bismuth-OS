@@ -9,6 +9,12 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# Part of this repository, not third-party packages: the hand-off reader,
+# and the placement rules' constants for the hand-off window.
+bismuth-elf = { path = "../elf" }
+bismuth-handoff = { path = "../handoff" }
+
 [features]
 # Ask QEMU to exit once the kernel has printed its line, or panicked. Only
 # the automated boot test turns this on; it must stay off for real hardware.

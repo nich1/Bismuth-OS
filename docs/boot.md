@@ -23,7 +23,7 @@ The firmware calls the function `efi_main` and passes it a pointer to the
 *system table*: a structure of pointers to services the firmware offers, such
 as printing text.
 
-The boot stage then does seven things:
+The boot stage then does eight things:
 
 1. **Writes `BISMUTH BOOT OK` to the serial port.** The serial port is an old,
    very simple device: send it a byte and the byte goes out on a wire. It
@@ -53,9 +53,11 @@ The boot stage then does seven things:
    KERNEL PLACE ERROR:` instead.
 5. **Gives the kernel its addresses and a stack.** It builds new address
    tables that keep everything the firmware had and add each segment at
-   its kernel address, with its own permissions, and the kernel's stack
-   below them (see "How the kernel is entered" below), and switches the
-   processor to them (see "Address tables" below). Then it checks the tables in use, reads
+   its kernel address, with its own permissions, the kernel's stack
+   below them and, below the stack, the window the hand-off structure
+   will be written in, read-only (see "How the kernel is entered" below),
+   and switches the processor to them (see "Address tables" below). Then
+   it checks the tables in use, reads
    every byte of the kernel back through its kernel addresses, and writes
    `BISMUTH KERNEL PLACED segments=2 pages=2 sum=0x108120a9f6b1b5b1
    perms=r--,r-x wp=1`: the sum must be the same as in the `COPIED` line,
@@ -69,36 +71,51 @@ The boot stage then does seven things:
    Anything that goes wrong gets a line starting `BISMUTH KERNEL MAP
    ERROR:` instead: 5-level paging is on, the processor cannot mark pages
    no-execute or did not turn that on, the top-level entry the kernel
-   goes under is already used, the firmware has no memory for the tables
-   or the stack, the table builder refuses a segment or the stack, a page
-   of a segment or of the stack is missing or has the wrong frame or
+   goes under is already used, the firmware has no memory for the tables,
+   the stack or the hand-off structure, the table builder refuses a
+   segment, the stack or the hand-off window, a page of a segment, of the
+   stack or of the window is missing or has the wrong frame or
    permissions, the guard page below the stack is mapped, or the bytes
    read back differ.
 6. **Leaves the firmware.** It reads the firmware's memory map and tells
    the firmware to step aside (see "Leaving the firmware" below), turns
    interrupts off, and writes `BISMUTH FIRMWARE LEFT descriptors=102
-   usable=52559` (the numbers are an example): how many entries the map
-   has, and how many 4 KiB pages of it are free for the kernel. If the
+   usable=52425` (the numbers are an example): how many entries the map
+   has, and how many 4 KiB pages of it are free for the kernel. The test
+   build adds ` bs=0` (see below). If the
    firmware refuses, it writes a line starting `BISMUTH FIRMWARE EXIT
    ERROR:` instead: there is no memory map or exit service, asking for the
-   map's size or reading the map failed, there is no memory for the map,
-   the map no longer fits its buffer, its entries are smaller than the
-   specification's, the exit failed, or the map changed twice in a row.
-   The status is given where the firmware returned one.
-7. **Jumps to the kernel.** It writes `BISMUTH KERNEL JUMP
-   entry=0xffffffff800013a0 stack=0xffffffff80000000` on the serial port
-   (the entry point is an example; the stack's top is fixed), then turns
-   interrupts off, moves to the kernel's stack and jumps to the entry
-   point. The kernel prints `BISMUTH KERNEL OK` on the serial port and
-   stops.
+   map's size or reading the map failed, there is no memory for the map
+   or for the hand-off's working space, the map no longer fits its
+   buffer, its entries are smaller than the specification's, the exit
+   failed, or the map changed twice in a row. The status is given where
+   the firmware returned one.
+7. **Builds the hand-off structure.** From the saved map it writes
+   Bismuth's own memory map into the hand-off window, with the kernel's
+   segments, its stack and its table frames marked as the kernel's (see
+   "The hand-off" below and `docs/handoff.md`). If the hand-off library
+   refuses, it writes a line starting `BISMUTH HANDOFF ERROR:` instead:
+   a firmware descriptor (named by its start) is unaligned, ends past
+   2^52 or overlaps another, a range of the kernel's is not wholly the
+   boot stage's memory, the working space is full, or the structure
+   needs more bytes than the window has.
+8. **Jumps to the kernel.** It writes `BISMUTH KERNEL JUMP
+   entry=0xffffffff800013a0 stack=0xffffffff80000000
+   handoff=0xffffffff7ffe0000` on the serial port (the entry point is an
+   example; the stack's top and the hand-off window are fixed), then
+   turns interrupts off, moves to the kernel's stack, puts the hand-off
+   address in `rdi` and jumps to the entry point. The kernel reads the
+   structure, prints `BISMUTH KERNEL MEMORY regions=41 usable=52425
+   kernel=78` (the numbers are an example) and `BISMUTH KERNEL OK` on the
+   serial port, and stops.
 
 Each failure gets its own line, and then the boot stage stops, putting the
 processor to sleep in a loop, because it is the only thing running. There
 is no screen to rely on and nobody to report to, so a clear message on the
 serial port is the only way to learn what went wrong.
 
-The boot stage keeps the memory map, but does not yet pass it, or
-anything else, to the kernel. That comes next.
+The memory map reaches the kernel only through the hand-off structure;
+nothing else is passed to it.
 
 ### Leaving the firmware
 
@@ -119,25 +136,35 @@ map must be read immediately before the call, after everything that
 allocates. Then the map the kernel gets is the one in force when the
 firmware stepped aside.
 
-So the boot stage does this, once the kernel's pages, its tables and its
-stack are all allocated and the firmware's console has printed its last
-line:
+So the boot stage does this, once the kernel's pages, its tables, its
+stack and the hand-off structure's pages are all allocated and the
+firmware's console has printed its last line (the call takes the
+console, so the compiler refuses a console call after it):
 
 1. It asks the firmware how large the map is.
 2. It allocates a buffer for the map (loader data, never freed), with
    room for eight entries more than asked for: allocating the buffer can
    itself split a free range into up to three, and the firmware may
-   allocate for itself in between.
-3. It reads the map into the buffer, and calls `ExitBootServices` with
+   allocate for itself in between. The specification promises only the
+   size with this answer, so the room is reckoned with the entry size the
+   firmware states or the specification's 40 bytes, whichever is larger.
+3. It allocates the hand-off builder's working space (loader data, whole
+   pages, never freed): one region for each entry the buffer could hold
+   at 40 bytes each, the smallest entry size the boot stage accepts, and
+   two more for each of the ten ranges at most that it sets aside for
+   the kernel (eight segments, the stack, the table frames), since one
+   range can split a region in three and the builder counts its space
+   before merging.
+4. It reads the map into the buffer, and calls `ExitBootServices` with
    its key.
-4. If the firmware answers that the key is stale, the map changed in
+5. If the firmware answers that the key is stale, the map changed in
    between, so it reads the map again into the same buffer, without
    allocating, and tries once more. A second refusal, any other error, or
    a map that no longer fits is a failure. After a refused
    `ExitBootServices` only the firmware's memory services may be called,
    and the boot stage calls nothing but `GetMemoryMap`; the serial port
    and QEMU's exit device are written directly, not through the firmware.
-5. It turns interrupts off at once: the firmware's timer and its
+6. It turns interrupts off at once: the firmware's timer and its
    handlers belonged to the boot services that have just ended. (Not
    before the call: if it fails, boot services keep running and expect
    interrupts as they left them. QEMU's firmware has already turned them
@@ -147,16 +174,33 @@ It counts the entries by stepping through the map by the entry size the
 firmware states, which may be larger than the structure in the
 specification (40 bytes; QEMU's firmware uses 48), and counts as usable
 only the entries of type `EfiConventionalMemory`, through the same table
-the hand-off structure uses (`docs/handoff.md`). The map's address, size,
-entry size and entry version are kept for the kernel's hand-off, which
-comes next.
+the hand-off structure uses (`docs/handoff.md`). An entry whose
+attributes carry `EFI_MEMORY_SP` (memory set aside for a specific
+purpose, section 7.2) is treated as `EfiReservedMemoryType` here and in
+the hand-off structure, so it is never counted or reported as usable.
 
-Nothing in the boot test can tell whether `ExitBootServices` really ran:
-with the call left out, every scenario still passes. What shows it ran is
-that, done by hand, a firmware call made afterwards (printing on the
-firmware's console) faults instead of printing, and that the firmware
-clears the system table's console and boot services pointers, which stay
-set without the call.
+In the test build (`qemu-exit`), the boot stage reads the system table's
+boot services pointer once the call has succeeded and adds it to the
+`FIRMWARE LEFT` line as ` bs=<n>`; the boot test expects `bs=0`. QEMU's
+firmware clears the pointer, and with the call left out it stays set, so
+this shows the test that the call ran. The specification only says the
+firmware should clear it, so this is evidence for the test, not a check
+the boot stage makes on real hardware. Done by hand, a firmware call
+made afterwards (printing on the firmware's console) also faults instead
+of printing.
+
+### The hand-off
+
+Once boot services have ended, the boot stage builds the hand-off
+structure (`docs/handoff.md`) with the `handoff` library, from the saved
+map, in `boot/src/handoff.rs`: every firmware descriptor, stepping by the
+entry size the firmware states, then the kernel's own ranges set aside:
+each segment's pages, the stack's 16 pages and the whole block of 54
+table frames. It writes the structure into the hand-off window's pages,
+allocated before the map was read, and never writes them again. Any
+refusal stops the boot with a `BISMUTH HANDOFF ERROR:` line. The test
+build with the `damage-handoff` feature also damages the structure's
+marker once it is written, for the boot test.
 
 ### How the kernel is entered
 
@@ -178,7 +222,10 @@ relies on all of it, and must not rely on anything not listed.
   is 16 pages (64 KiB) at `0xFFFF_FFFF_7FFF_0000` up to
   `0xFFFF_FFFF_8000_0000`, writable, not executable, cleared; the page
   below it, at `0xFFFF_FFFF_7FFE_F000`, is not mapped, so running off the
-  stack faults instead of overwriting other memory. The firmware's
+  stack faults instead of overwriting other memory. The hand-off window
+  is 8 pages (32 KiB) at `0xFFFF_FFFF_7FFE_0000` up to
+  `0xFFFF_FFFF_7FFE_8000`, read-only, not executable; the pages between
+  it and the guard page are not mapped. The firmware's
   mappings are all still there in the lower half, the boot stage's
   among them, but the kernel must not rely on them: they go once the
   kernel has its own tables.
@@ -193,8 +240,10 @@ relies on all of it, and must not rely on anything not listed.
   back, but the processor still reads all of it.
   The kernel must not reuse it until it runs on tables of its own and has
   loaded descriptor and interrupt tables of its own. The kernel's
-  segments, its stack, the frames of the new tables and the memory map's
-  buffer are loader data, which nothing else will take.
+  segments, its stack, the frames of the new tables, the hand-off
+  structure's pages, its working space and the memory map's buffer are
+  loader data, which nothing else will take; the hand-off structure lists
+  the first three as the kernel's and the rest as loader memory.
 - **`IA32_EFER.NXE`:** on. The tables mark pages that may not run code
   with a bit that is reserved, and faults, while it is off. The boot
   stage turns it on if the firmware has not.
@@ -213,10 +262,21 @@ relies on all of it, and must not rely on anything not listed.
   to a function, System V x86-64 code expects the stack pointer plus 8 to
   be a multiple of 16, as it is just after a `call` has pushed a return
   address. The eight bytes at the stack pointer are zero.
-- **The general-purpose registers are undefined.** Nothing is passed to
-  the kernel yet. The other control registers, and the floating-point and
-  vector state, are as the firmware left them; the kernel is built not to
-  use the floating-point and vector registers.
+- **`rdi`:** the hand-off structure's address, `0xFFFF_FFFF_7FFE_0000`,
+  the start of the window. `rdi` is where a System V function takes its
+  first argument (psABI section 3.2.3 "Parameter Passing"), so the entry
+  stub leaves it alone and the kernel's Rust entry receives it as an
+  ordinary argument. The structure is written in full, as
+  `docs/handoff.md` lays it out, from the start of the window; the rest
+  of the window is zero. Nothing writes the window after the jump, so
+  the kernel may read it for as long as it runs on the boot stage's
+  tables. Its pages are loader memory: once the kernel has its own
+  tables, the window goes with them, so it must copy out what it needs
+  first.
+- **The other general-purpose registers are undefined.** The other
+  control registers, and the floating-point and vector state, are as the
+  firmware left them; the kernel is built not to use the floating-point
+  and vector registers.
 - **The firmware:** boot services have ended (`ExitBootServices`
   succeeded), so the firmware's console, disk and memory services are
   gone. The specification says the firmware should clear the system
@@ -231,28 +291,41 @@ relies on all of it, and must not rely on anything not listed.
   itself.
 
 **What the kernel checks.** Its entry point is a short stub of a few
-instructions (`kernel/src/cpu.rs`) that records the stack pointer and
-`RFLAGS` before anything changes them, then clears the direction flag,
-aligns the stack and calls the kernel proper. That checks, in
+instructions (`kernel/src/cpu.rs`) that records the stack pointer (in
+`rsi`) and `RFLAGS` (in `rdx`) before anything changes them, leaving
+`rdi` as it is, then clears the direction flag, aligns the stack and
+calls the kernel proper with the three. That checks, in
 `kernel/src/entry.rs`, that interrupts were off, that the direction flag
 was clear, and that the stack pointer was 8 below a multiple of 16 and
 in the top half of the address range. If not, it prints `BISMUTH KERNEL
 ENTRY ERROR:` and what is wrong (for example `interrupts are on`, or
 `stack pointer not 8 below a multiple of 16: 0xffffffff80000000`) and
-stops, with the kernel's failure code under `qemu-exit`. The rest of the
-list it does not check: a broken mapping or a missing `NXE` makes it
-fault instead, and the boot stage's own checks come first.
+stops, with the kernel's failure code under `qemu-exit`. Then it checks
+that the hand-off address is in the top half, on a page and the window's
+address, makes the window into bytes (`kernel/src/handoff.rs`) and reads
+the structure with the `handoff` library's reader. If either fails it
+prints `BISMUTH KERNEL HANDOFF ERROR:` and what is wrong (for example
+`the marker is wrong`) and stops the same way; otherwise it prints
+`BISMUTH KERNEL MEMORY regions=<n> usable=<pages> kernel=<pages>`: the
+number of regions, the reader's sum of usable pages, and the sum of the
+pages of the kernel's own kind. The rest of the list it does not check:
+a broken mapping or a missing `NXE` makes it fault instead, and the boot
+stage's own checks come first.
 
 The stack cannot meet a kernel segment: its top is the lowest address a
 segment may start at, the placement rules refuse a segment below it or
 one that runs past the top of the address range, and
 `elf/src/place.rs` fails to build if the stack's constants are moved
-above it. The stack and its guard page lie in the 2 MiB below the
+above it. The hand-off window lies below the guard page, so below the
+stack and every segment, and the same file fails to build if its
+constants move it onto the guard page or out of the stack's 2 MiB. The
+stack, its guard page and the window lie in the 2 MiB below the
 kernel's 2 GiB, which no segment shares, so they need one directory and
 one last-level table of their own. Before the jump the boot stage looks
 up every page of the stack in the tables in use and requires its own
-frame, writable and not executable, and requires the guard page to be
-missing.
+frame, writable and not executable, requires the guard page to be
+missing, and requires every page of the window to lead to its own frame,
+read-only and not executable.
 
 ### Address tables
 
@@ -295,8 +368,9 @@ that feature on if the firmware has not, because the library marks pages
 that may not run code with a bit the processor otherwise treats as an
 error. The memory for
 the tables comes from the firmware in one block, enough for any kernel the
-placement rules accept and the stack: 54 frames, of which today's kernel
-and its stack need six.
+placement rules accept, the stack and the hand-off window: 54 frames, of
+which today's kernel, its stack and the window need six (the window
+shares the stack's tables).
 
 **What the `PLACED` line proves.** Each page of each segment is looked up
 in the tables the processor is using (the address read back from CR3, so
@@ -305,7 +379,8 @@ and must lead to that segment's own frame with that segment's permissions.
 Then every byte is read through the kernel addresses, so through the
 processor's own lookup, and the sum must match the copy. Each page of the
 stack is looked up the same way and must lead to its own frame, read and
-write, and the guard page below it must not be mapped. And the firmware
+write, and the guard page below it must not be mapped; each page of the
+hand-off window must lead to its own frame, read-only. And the firmware
 still prints on its console afterwards. That code at the kernel addresses
 can run, on that stack, is shown next, by the kernel's own line.
 **What it does not prove.** It does not show that read-only pages refuse
@@ -346,8 +421,9 @@ nothing underneath it, no firmware and no operating system, so it is built for
 a different Rust target, `x86_64-unknown-none` (x86-64, no operating system).
 That target produces an ELF file. `cargo xtask build` copies it onto the boot
 disk at `target/esp/EFI/BISMUTH/KERNEL.ELF`, next to the boot stage. Today the
-kernel's entry function sets up the serial port, writes `BISMUTH KERNEL OK`
-to it, and stops the processor in a loop. If the kernel panics, it writes
+kernel's entry function checks its entry state, sets up the serial port,
+reads the hand-off structure and writes its `MEMORY` line, then writes
+`BISMUTH KERNEL OK` and stops the processor in a loop. If the kernel panics, it writes
 `BISMUTH KERNEL PANIC` instead and stops.
 
 **ELF** is the standard executable format on Linux and most other Unix-like
@@ -407,7 +483,9 @@ QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
    features, and copies the boot stage to
    `target/esp/EFI/BOOT/BOOTX64.EFI`. It also builds a second kernel file
    with the kernel's `panic-at-entry` feature, which panics as soon as it
-   starts.
+   has printed its `MEMORY` line, and a second boot stage with the boot
+   stage's `damage-handoff` feature, which damages the hand-off
+   structure's marker after writing it.
 2. For each scenario below it lays out a separate disk folder, starts QEMU
    with UEFI firmware and presents that folder as a FAT disk. No window is
    shown, and the imitation serial port is connected to the test.
@@ -416,33 +494,44 @@ QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
    a special QEMU device that makes QEMU quit with exit code 35. Otherwise
    it jumps to the kernel, which prints its own line and makes QEMU quit
    with codes of its own: 65 once it has printed `BISMUTH KERNEL OK`, 67
-   if it panicked. (33 was the boot stage's success before it started the
+   if it panicked or refused its entry state or the hand-off structure. (33 was the boot stage's success before it started the
    kernel; nothing uses it now.)
 5. A scenario passes if the serial output contains `BISMUTH BOOT OK` and then
    its expected lines in order, and QEMU exits with the expected code within
    the time limit. Where a number can only be known within limits, the
    expected line gives a range, written `[40000..=60000]`, that the printed
-   number must fall in. Anything else fails, and the captured output is shown.
+   number must fall in. A range written `[usable:40000..=60000]` also
+   names the number, and a later expected line's `[=usable]` must then be
+   the same number: that is how the kernel's count is held to the boot
+   stage's. Anything else fails, and the captured output is shown.
    If the firmware reports a processor exception (a line starting `!!!!
    X64 Exception Type`), for example because the kernel faulted, the test
    stops QEMU at once rather than wait for the time limit, since the
    firmware stops the processor after its report. A triple fault resets
    the machine, which QEMU's `-no-reboot` turns into exit code 0.
 
-The thirteen scenarios. "Started" stands for the lines of a boot that gets
+The fourteen scenarios. "Started" stands for the lines of a boot that gets
 as far as the kernel: `BISMUTH KERNEL FILE OK entry=... segments=...
 bytes=...`, matching what the ELF reader finds in the same file, then
 `BISMUTH KERNEL COPIED segments=... pages=... sum=...`, matching the pages
 the test lays out from the file itself, then `BISMUTH KERNEL PLACED` with
 the same numbers and each segment's permissions from its flags (`wp=`
 exactly `0` or `1`), then the firmware console's `Bismuth kernel addresses
-checked.`, then `BISMUTH FIRMWARE LEFT descriptors=... usable=...` with
-from 1 to 512 descriptors and from 40000 to 60000 usable pages (QEMU is
-given 256 MiB, 65536 pages, of which the firmware and the boot stage keep
-some; QEMU's firmware leaves about 52500 free; counting every type as
-usable, or stepping through the map by the wrong entry size, falls far
-outside), then `BISMUTH KERNEL JUMP entry=... stack=0xffffffff80000000`
-with the file's entry point.
+checked.`, then `BISMUTH FIRMWARE LEFT descriptors=... usable=... bs=0`
+with from 1 to 512 descriptors and from 40000 to 60000 usable pages (QEMU
+is given 256 MiB, 65536 pages, of which the firmware and the boot stage
+keep some; QEMU's firmware leaves about 52500 free; counting every type
+as usable, or stepping through the map by the wrong entry size, falls far
+outside) and the boot services pointer cleared, then `BISMUTH KERNEL JUMP
+entry=... stack=0xffffffff80000000 handoff=0xffffffff7ffe0000` with the
+file's entry point, then the kernel's `BISMUTH KERNEL MEMORY regions=...
+usable=... kernel=...` with from 16 to 256 regions (QEMU's 102
+descriptors merge to 41), exactly the usable pages of the `FIRMWARE LEFT`
+line of the same boot (counted by the boot stage from the firmware's
+map, and summed by the kernel from the structure the boot stage built),
+and as the kernel's own exactly the file's segment pages as the test lays
+them out, plus the stack's 16 pages and the 54 table frames. So the
+usable memory the kernel reports is tied to what QEMU was given.
 
 | Disk | Expected lines | Exit code |
 |---|---|---|
@@ -459,8 +548,9 @@ with the file's entry point.
 | The last segment moved onto the last page of the address range | `BISMUTH KERNEL PLACE ERROR: segment ... uses the last page of the address range`, naming the last segment | 35 |
 | The real kernel file, on a processor without no-execute pages (QEMU's `-cpu qemu64,-nx`) | The `FILE OK` and `COPIED` lines, then `BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute` | 35 |
 | The kernel file built to panic on entry | Started, then `BISMUTH KERNEL PANIC`, and never `BISMUTH KERNEL OK` | 67 |
+| The real kernel file, started by the boot stage built to damage the hand-off structure's marker | Started up to the `JUMP` line, then `BISMUTH KERNEL HANDOFF ERROR: the marker is wrong`, and never `BISMUTH KERNEL OK` | 67 |
 
-The `qemu-exit` features are off in normal builds. On a real PC nothing
+The `qemu-exit` and `damage-handoff` features are off in normal builds. On a real PC nothing
 answers at that port, so the writes are left out entirely.
 
 ## Why our own boot stage
@@ -485,15 +575,18 @@ structure.
 
 The structures in `boot/src/uefi.rs` and the files beside it follow the UEFI
 specification (version 2.10), declared by hand, and their comments name the
-sections: 2.3.4 for the identity mapping on x64, 4.3 for the system table,
-4.4 for the boot services table, 7.2 for memory and page allocation and
-for `GetMemoryMap` and the memory descriptor, 7.3 for looking up a
+sections: 2.3.4 for the identity mapping on x64, 4.3 for the system table
+(and its boot services pointer, read again after the exit in the test
+build), 4.4 for the boot services table, 7.2 for memory and page allocation and
+for `GetMemoryMap`, the memory descriptor and its attribute bits
+(`EFI_MEMORY_SP`), 7.3 for looking up a
 protocol, 7.4 for `ExitBootServices`, 9.1 for the Loaded Image
 Protocol, 12.4 for text output, 13.4 for the Simple File System Protocol and
 13.5 for the File Protocol; the status values are in appendix D. Only the
 fields the boot stage uses are declared. The order of the calls that end
-boot services, and the count of the map, are in `boot/src/leave.rs`,
-which has no firmware code.
+boot services, and the reading and count of the map's descriptors, are in
+`boot/src/leave.rs`, and the building of the hand-off structure in
+`boot/src/handoff.rs`; neither has firmware code.
 
 The ELF layouts in `elf/src/lib.rs` follow the System V ABI's ELF
 specification (chapters 4 and 5) and its x86-64 supplement, as the comments
@@ -514,7 +607,9 @@ Interrupts are turned off after leaving the firmware with `CLI` (Intel
 volume 2A). The jump to the kernel in `boot/src/cpu.rs` uses `CLI`, `CLD`, `LEA` and
 `JMP` (Intel volume 2A, each instruction's entry), and the state it leaves
 the stack and flags in is what the System V AMD64 psABI, section 3.2
-"Function Calling Sequence", asks of a function's entry. The kernel's
+"Function Calling Sequence", asks of a function's entry; the hand-off
+address goes in `rdi`, a function's first argument under section 3.2.3
+"Parameter Passing". The kernel's
 entry stub in `kernel/src/cpu.rs` uses `MOV`, `PUSHFQ`, `POP`, `CLD`,
 `AND`, `CALL` and `UD2` (Intel volumes 2A and 2B), and the flags it
 checks in `kernel/src/entry.rs` are those of Intel volume 1, section

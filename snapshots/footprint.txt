@@ -1,16 +1,17 @@
-boot image bytes: 121856
+boot image bytes: 176128
 third-party packages: 0
 unsafe blocks in boot/src/cpu.rs: 9
+unsafe blocks in boot/src/handoff.rs: 0
 unsafe blocks in boot/src/leave.rs: 0
 unsafe blocks in boot/src/load.rs: 0
 unsafe blocks in boot/src/main.rs: 5
 unsafe blocks in boot/src/map.rs: 4
-unsafe blocks in boot/src/memory.rs: 3
+unsafe blocks in boot/src/memory.rs: 5
 unsafe blocks in boot/src/port.rs: 3
 unsafe blocks in boot/src/report.rs: 0
 unsafe blocks in boot/src/serial.rs: 3
 unsafe blocks in boot/src/uefi.rs: 2
-unsafe blocks in boot/src/uefi/boot_services.rs: 9
+unsafe blocks in boot/src/uefi/boot_services.rs: 10
 unsafe blocks in boot/src/uefi/file.rs: 13
 unsafe blocks in descriptors/src/lib.rs: 0
 unsafe blocks in descriptors/src/tests.rs: 0
@@ -24,12 +25,14 @@ unsafe blocks in handoff/src/lib.rs: 0
 unsafe blocks in handoff/src/tests.rs: 0
 unsafe blocks in kernel/src/cpu.rs: 1
 unsafe blocks in kernel/src/entry.rs: 0
-unsafe blocks in kernel/src/main.rs: 0
+unsafe blocks in kernel/src/handoff.rs: 1
+unsafe blocks in kernel/src/main.rs: 1
 unsafe blocks in kernel/src/port.rs: 3
 unsafe blocks in kernel/src/serial.rs: 3
 unsafe blocks in paging/src/lib.rs: 0
 unsafe blocks in paging/src/tests.rs: 0
 unsafe fn declarations in boot/src/cpu.rs: 3
+unsafe fn declarations in boot/src/handoff.rs: 0
 unsafe fn declarations in boot/src/leave.rs: 0
 unsafe fn declarations in boot/src/load.rs: 0
 unsafe fn declarations in boot/src/main.rs: 1
@@ -53,6 +56,7 @@ unsafe fn declarations in handoff/src/lib.rs: 0
 unsafe fn declarations in handoff/src/tests.rs: 0
 unsafe fn declarations in kernel/src/cpu.rs: 0
 unsafe fn declarations in kernel/src/entry.rs: 0
+unsafe fn declarations in kernel/src/handoff.rs: 1
 unsafe fn declarations in kernel/src/main.rs: 0
 unsafe fn declarations in kernel/src/port.rs: 2
 unsafe fn declarations in kernel/src/serial.rs: 0

@@ -1,12 +1,14 @@
 //! Memory the boot stage reaches by raw address while it gives the kernel
 //! its addresses: the firmware's top-level address table, the frames the new
-//! tables live in, and the kernel's pages at their kernel addresses.
+//! tables live in, the kernel's pages at their kernel addresses, and the
+//! hand-off builder's working space.
 //!
 //! While boot services run, the firmware maps all memory at addresses equal
 //! to its physical ones (UEFI specification 2.10, section 2.3.4, x64
 //! platforms), so a physical address is also a pointer. The new tables keep
 //! that mapping.
 
+use bismuth_handoff::Region;
 use bismuth_paging::{PAGE_SIZE, PhysicalMemory};
 
 use crate::report::{MapFailure, PlaceFailure};
@@ -112,6 +114,28 @@ impl PhysicalMemory for Frames {
             }
         }
     }
+}
+
+/// `bytes`, whole pages the firmware gave this program, as working space of
+/// regions for the hand-off builder, each set to the empty region first,
+/// since cleared bytes are not a valid [`Kind`](bismuth_handoff::Kind).
+/// `None` if they are not aligned for a region.
+pub fn regions(bytes: &'static mut [u8]) -> Option<&'static mut [Region]> {
+    let start = bytes.as_mut_ptr().cast::<Region>();
+    if !start.is_aligned() {
+        return None;
+    }
+    let count = bytes.len() / size_of::<Region>();
+    for index in 0..count {
+        // SAFETY: `start` is aligned for a region and `index` regions past
+        // it still lie inside `bytes`, which this function owns, so the
+        // write stays inside memory nothing else uses.
+        unsafe { start.add(index).write(Region::default()) }
+    }
+    // SAFETY: the first `count` regions of `bytes` were each written with
+    // a valid region just above, `start` is aligned, and the borrow of
+    // `bytes` passes to the slice for good.
+    Some(unsafe { core::slice::from_raw_parts_mut(start, count) })
 }
 
 /// A copy of the 512 entries of the top-level table at physical address
