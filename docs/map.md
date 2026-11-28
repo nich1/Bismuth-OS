@@ -25,6 +25,7 @@ something.
 | ELF reader | `elf/src/lib.rs` | Safe, allocation-free library that checks an ELF file and reports its entry point and loadable segments, or an error. The boot stage uses it on the kernel file | `cargo xtask check` runs its unit tests (`elf/src/tests.rs`) and runs it on the kernel file |
 | Placement rules | `elf/src/place.rs` | Part of the ELF reader. The one copy of the rules for placing the kernel at the addresses it is linked for (fixed-address executable, at or above `0xFFFF_FFFF_8000_0000`, no shared pages, at most 16384 pages and 8 segments, not on the last page of the address range, entry point in an executable segment), the pages each segment takes, and the FNV-1a checksum. Used by the boot stage and by `cargo xtask check` | `cargo xtask check` runs its unit tests (`elf/src/place/tests.rs`) |
 | Address table builder | `paging/src/lib.rs` | Safe, allocation-free library that builds x86-64 4-level address tables (page tables): maps a range of virtual addresses to physical ones with 4 KiB pages and read, write and execute permissions, in memory the caller lends it, and looks an address up the way the processor does. The boot stage uses it to put the kernel at its address and to check the result | `cargo xtask check` runs its unit tests (`paging/src/tests.rs`) |
+| Hand-off structure | `handoff/src/lib.rs` | Safe, allocation-free library for the structure the boot stage will hand the kernel: Bismuth's own memory map, with each firmware memory type turned into one of Bismuth's kinds. The builder takes firmware descriptors in any order, sets ranges aside for the kernel and writes the sorted, merged list; the reader checks any bytes and lists the regions and the usable pages. Nothing uses it yet | `cargo xtask check` runs its unit tests (`handoff/src/tests.rs`) |
 
 ## The boot disk
 
@@ -65,6 +66,7 @@ none.
 |---|---|
 | `docs/decisions.md` | What has been decided, and why |
 | `docs/boot.md` | How the system starts |
+| `docs/handoff.md` | The structure the boot stage hands the kernel: its layout, the kinds of memory, and the firmware type to kind table |
 | `docs/testing.md` | How it is tested, the footprint snapshot, and the planned snapshots |
 | `docs/workflow.md` | Who does what, and the path of a task |
 | `AGENTS.md` | The rules every contributor follows |
