@@ -104,10 +104,11 @@ The boot stage then does eight things:
    handoff=0xffffffff7ffe0000` on the serial port (the entry point is an
    example; the stack's top and the hand-off window are fixed), then
    turns interrupts off, moves to the kernel's stack, puts the hand-off
-   address in `rdi` and jumps to the entry point. The kernel reads the
-   structure, prints `BISMUTH KERNEL MEMORY regions=41 usable=52425
-   kernel=78` (the numbers are an example) and `BISMUTH KERNEL OK` on the
-   serial port, and stops.
+   address in `rdi` and jumps to the entry point. The kernel loads its
+   own processor tables and prints `BISMUTH KERNEL TABLES OK`
+   (`docs/kernel.md`), reads the structure, prints `BISMUTH KERNEL MEMORY
+   regions=41 usable=52425 kernel=99` (the numbers are an example) and
+   `BISMUTH KERNEL OK` on the serial port, and stops.
 
 Each failure gets its own line, and then the boot stage stops, putting the
 processor to sleep in a loop, because it is the only thing running. There
@@ -255,7 +256,9 @@ relies on all of it, and must not rely on anything not listed.
   in the kernel runs the firmware's handler, on the kernel's stack. That
   handler is in the lower half, which is still mapped, and in QEMU it
   still prints its report, but it belongs to the boot services that have
-  ended: the kernel must not rely on it.
+  ended. The kernel relies on that table and the firmware's segment
+  table only until it has loaded its own, its first act after checking
+  this state (`docs/kernel.md`).
 - **Direction flag:** clear (`RFLAGS.DF`). The other bits of `RFLAGS` are
   undefined.
 - **Stack pointer:** `0xFFFF_FFFF_7FFF_FFF8`, eight below the top. On entry
@@ -300,8 +303,9 @@ was clear, and that the stack pointer was 8 below a multiple of 16 and
 in the top half of the address range. If not, it prints `BISMUTH KERNEL
 ENTRY ERROR:` and what is wrong (for example `interrupts are on`, or
 `stack pointer not 8 below a multiple of 16: 0xffffffff80000000`) and
-stops, with the kernel's failure code under `qemu-exit`. Then it checks
-that the hand-off address is in the top half, on a page and the window's
+stops, with the kernel's failure code under `qemu-exit`. Then it loads
+its own segment, task state segment and interrupt tables
+(`docs/kernel.md`), and checks that the hand-off address is in the top half, on a page and the window's
 address, makes the window into bytes (`kernel/src/handoff.rs`) and reads
 the structure with the `handoff` library's reader. If either fails it
 prints `BISMUTH KERNEL HANDOFF ERROR:` and what is wrong (for example
@@ -421,10 +425,12 @@ nothing underneath it, no firmware and no operating system, so it is built for
 a different Rust target, `x86_64-unknown-none` (x86-64, no operating system).
 That target produces an ELF file. `cargo xtask build` copies it onto the boot
 disk at `target/esp/EFI/BISMUTH/KERNEL.ELF`, next to the boot stage. Today the
-kernel's entry function checks its entry state, sets up the serial port,
-reads the hand-off structure and writes its `MEMORY` line, then writes
-`BISMUTH KERNEL OK` and stops the processor in a loop. If the kernel panics, it writes
-`BISMUTH KERNEL PANIC` instead and stops.
+kernel's entry function checks its entry state, loads its own processor
+tables and writes `BISMUTH KERNEL TABLES OK`, reads the hand-off structure
+and writes its `MEMORY` line, then writes `BISMUTH KERNEL OK` and stops the
+processor in a loop. If the kernel panics, it writes `BISMUTH KERNEL PANIC`
+instead and stops; if it faults, it writes a `BISMUTH KERNEL FAULT` line
+and stops (`docs/kernel.md`).
 
 **ELF** is the standard executable format on Linux and most other Unix-like
 systems. A file starts with a *header* that says what kind of file it is, which
@@ -483,9 +489,11 @@ QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
    features, and copies the boot stage to
    `target/esp/EFI/BOOT/BOOTX64.EFI`. It also builds a second kernel file
    with the kernel's `panic-at-entry` feature, which panics as soon as it
-   has printed its `MEMORY` line, and a second boot stage with the boot
+   has printed its `MEMORY` line, a second boot stage with the boot
    stage's `damage-handoff` feature, which damages the hand-off
-   structure's marker after writing it.
+   structure's marker after writing it, and one more kernel file for each
+   of the kernel's seven `fault-*` features, which make one fault each
+   once the `MEMORY` line is printed.
 2. For each scenario below it lays out a separate disk folder, starts QEMU
    with UEFI firmware and presents that folder as a FAT disk. No window is
    shown, and the imitation serial port is connected to the test.
@@ -494,7 +502,8 @@ QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
    a special QEMU device that makes QEMU quit with exit code 35. Otherwise
    it jumps to the kernel, which prints its own line and makes QEMU quit
    with codes of its own: 65 once it has printed `BISMUTH KERNEL OK`, 67
-   if it panicked or refused its entry state or the hand-off structure. (33 was the boot stage's success before it started the
+   if it panicked, refused its entry state or the hand-off structure, or
+   reported a fault. (33 was the boot stage's success before it started the
    kernel; nothing uses it now.)
 5. A scenario passes if the serial output contains `BISMUTH BOOT OK` and then
    its expected lines in order, and QEMU exits with the expected code within
@@ -510,9 +519,10 @@ QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
    firmware stops the processor after its report. A triple fault resets
    the machine, which QEMU's `-no-reboot` turns into exit code 0.
 
-The fourteen scenarios. "Started" stands for the lines of a boot that gets
-as far as the kernel: `BISMUTH KERNEL FILE OK entry=... segments=...
-bytes=...`, matching what the ELF reader finds in the same file, then
+The twenty-one scenarios: the fourteen in the table below, then the
+seven fault scenarios described after it. "Started" stands for the lines
+of a boot that gets as far as the kernel: `BISMUTH KERNEL FILE OK
+entry=... segments=... bytes=...`, matching what the ELF reader finds in the same file, then
 `BISMUTH KERNEL COPIED segments=... pages=... sum=...`, matching the pages
 the test lays out from the file itself, then `BISMUTH KERNEL PLACED` with
 the same numbers and each segment's permissions from its flags (`wp=`
@@ -524,8 +534,8 @@ keep some; QEMU's firmware leaves about 52500 free; counting every type
 as usable, or stepping through the map by the wrong entry size, falls far
 outside) and the boot services pointer cleared, then `BISMUTH KERNEL JUMP
 entry=... stack=0xffffffff80000000 handoff=0xffffffff7ffe0000` with the
-file's entry point, then the kernel's `BISMUTH KERNEL MEMORY regions=...
-usable=... kernel=...` with from 16 to 256 regions (QEMU's 102
+file's entry point, then the kernel's `BISMUTH KERNEL TABLES OK`, then its
+`BISMUTH KERNEL MEMORY regions=... usable=... kernel=...` with from 16 to 256 regions (QEMU's 102
 descriptors merge to 41), exactly the usable pages of the `FIRMWARE LEFT`
 line of the same boot (counted by the boot stage from the firmware's
 map, and summed by the kernel from the structure the boot stage built),
@@ -548,9 +558,17 @@ usable memory the kernel reports is tied to what QEMU was given.
 | The last segment moved onto the last page of the address range | `BISMUTH KERNEL PLACE ERROR: segment ... uses the last page of the address range`, naming the last segment | 35 |
 | The real kernel file, on a processor without no-execute pages (QEMU's `-cpu qemu64,-nx`) | The `FILE OK` and `COPIED` lines, then `BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute` | 35 |
 | The kernel file built to panic once it has read the hand-off | Started, then `BISMUTH KERNEL PANIC`, and never `BISMUTH KERNEL OK` | 67 |
-| The real kernel file, started by the boot stage built to damage the hand-off structure's marker | Started up to the `JUMP` line, then `BISMUTH KERNEL HANDOFF ERROR: the marker is wrong`, and never `BISMUTH KERNEL OK` | 67 |
+| The real kernel file, started by the boot stage built to damage the hand-off structure's marker | Started up to the `JUMP` line and the kernel's tables line, then `BISMUTH KERNEL HANDOFF ERROR: the marker is wrong`, and never `BISMUTH KERNEL OK` | 67 |
 
-The `qemu-exit` and `damage-handoff` features are off in normal builds. On a real PC nothing
+Every scenario that reaches the kernel also expects `BISMUTH KERNEL TABLES
+OK`, which the kernel prints once it has loaded its own tables, right after
+the `JUMP` line and before it reads the hand-off structure. Seven more
+scenarios, one per deliberate fault, follow these: each is started up to
+the `MEMORY` line, then expects the kernel's own `FAULT` line; they are
+described in `docs/kernel.md`.
+
+The `qemu-exit`, `damage-handoff`, `panic-at-entry` and `fault-*` features
+are off in normal builds. On a real PC nothing
 answers at that port, so the writes are left out entirely.
 
 ## Why our own boot stage
