@@ -12,6 +12,8 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod command_tables;
 mod footprint;
 mod host;
 
@@ -36,6 +38,8 @@ tasks:
           footprint snapshot, kernel file check, boot scenarios
 
 code host tasks (need gh, GitHub's command-line tool):
+  issue-list [--label <name>]
+          print the number and title of each open issue, one per line
   issue-read <number>
   issue-comment <number> --body-file <path>
   issue-new --title <text> --body-file <path> [--label <name>]
@@ -78,6 +82,8 @@ fn main() -> ExitCode {
         ["snapshot"] => snapshot(false),
         ["snapshot", "--update"] => snapshot(true),
         ["check"] => check(),
+        ["issue-list"] => host::issue_list(None),
+        ["issue-list", "--label", label] => host::issue_list(Some(label)),
         ["issue-read", n] if is_number(n) => host::issue_read(n),
         ["issue-comment", n, "--body-file", body] if is_number(n) => host::issue_comment(n, body),
         ["issue-new", "--title", title, "--body-file", body] => host::issue_new(title, body, None),

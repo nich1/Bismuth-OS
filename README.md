@@ -25,11 +25,11 @@ You need [Rust](https://rustup.rs) and [QEMU](https://www.qemu.org). The pinned 
 |---|---|
 | `cargo xtask build` | Builds the boot image and the kernel into `target/esp` |
 | `cargo xtask run` | Boots it in QEMU with a window and serial output |
-| `cargo xtask test` | Boots it in QEMU with no window and checks the output |
+| `cargo xtask test` | Boots the boot scenarios in QEMU with no window and checks the output |
 | `cargo xtask snapshot` | Builds the boot image and prints the footprint report; `--update` also stores it in `snapshots/footprint.txt` |
-| `cargo xtask check` | Format check, lints, unit tests, the footprint snapshot, the kernel file check and the boot scenarios |
+| `cargo xtask check` | What the boot checks workflow runs on a pull request: the feature map check, format check, lints, unit tests, the footprint snapshot, the kernel file check and the boot scenarios. Not the text checks |
 | `cargo xtask pr-open`, `pr-edit`, `pr-ready`, `pr-wait` | Push the branch and open its pull request, replace its description, mark it ready, wait for its checks |
-| `cargo xtask issue-read`, `issue-comment`, `issue-new` | Read an issue with its comments, comment on one, file one |
+| `cargo xtask issue-list`, `issue-read`, `issue-comment`, `issue-new` | List the open issues, with `--label` only those with one label; read an issue with its comments, comment on one, file one |
 
 The pull request and issue commands need [gh](https://cli.github.com), GitHub's command-line tool. They use its sign-in, or else the one git already has for github.com. `cargo xtask` with no task lists their arguments.
 
