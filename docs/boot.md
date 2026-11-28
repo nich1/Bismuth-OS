@@ -425,10 +425,12 @@ nothing underneath it, no firmware and no operating system, so it is built for
 a different Rust target, `x86_64-unknown-none` (x86-64, no operating system).
 That target produces an ELF file. `cargo xtask build` copies it onto the boot
 disk at `target/esp/EFI/BISMUTH/KERNEL.ELF`, next to the boot stage. Today the
-kernel's entry function checks its entry state, sets up the serial port,
-reads the hand-off structure and writes its `MEMORY` line, then writes
-`BISMUTH KERNEL OK` and stops the processor in a loop. If the kernel panics, it writes
-`BISMUTH KERNEL PANIC` instead and stops.
+kernel's entry function checks its entry state, loads its own processor
+tables and writes `BISMUTH KERNEL TABLES OK`, reads the hand-off structure
+and writes its `MEMORY` line, then writes `BISMUTH KERNEL OK` and stops the
+processor in a loop. If the kernel panics, it writes `BISMUTH KERNEL PANIC`
+instead and stops; if it faults, it writes a `BISMUTH KERNEL FAULT` line
+and stops (`docs/kernel.md`).
 
 **ELF** is the standard executable format on Linux and most other Unix-like
 systems. A file starts with a *header* that says what kind of file it is, which
@@ -556,7 +558,7 @@ usable memory the kernel reports is tied to what QEMU was given.
 | The last segment moved onto the last page of the address range | `BISMUTH KERNEL PLACE ERROR: segment ... uses the last page of the address range`, naming the last segment | 35 |
 | The real kernel file, on a processor without no-execute pages (QEMU's `-cpu qemu64,-nx`) | The `FILE OK` and `COPIED` lines, then `BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute` | 35 |
 | The kernel file built to panic once it has read the hand-off | Started, then `BISMUTH KERNEL PANIC`, and never `BISMUTH KERNEL OK` | 67 |
-| The real kernel file, started by the boot stage built to damage the hand-off structure's marker | Started up to the `JUMP` line, then `BISMUTH KERNEL HANDOFF ERROR: the marker is wrong`, and never `BISMUTH KERNEL OK` | 67 |
+| The real kernel file, started by the boot stage built to damage the hand-off structure's marker | Started up to the `JUMP` line and the kernel's tables line, then `BISMUTH KERNEL HANDOFF ERROR: the marker is wrong`, and never `BISMUTH KERNEL OK` | 67 |
 
 Every scenario that reaches the kernel also expects `BISMUTH KERNEL TABLES
 OK`, which the kernel prints once it has loaded its own tables, right after
