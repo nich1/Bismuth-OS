@@ -1014,6 +1014,11 @@ fn check() -> Result<()> {
         cargo_step("unit tests (xtask)", vec!["test", "--package", "xtask"]),
         cargo_step("lints (xtask)", lints("xtask", &[])),
         cargo_step(
+            "unit tests (acpi)",
+            vec!["test", "--package", "bismuth-acpi"],
+        ),
+        cargo_step("lints (acpi)", lints("bismuth-acpi", &["--all-targets"])),
+        cargo_step(
             "unit tests (descriptors)",
             vec!["test", "--package", "bismuth-descriptors"],
         ),
