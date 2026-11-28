@@ -1,0 +1,10 @@
+[package]
+name = "bismuth-paging"
+description = "Builds x86-64 4-level page tables with 4 KiB pages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
