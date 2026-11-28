@@ -27,4 +27,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
       - name: Run all checks
+        # Without it, a missing QEMU ends the check as "not run" instead of
+        # failing it. tools/check-workflows.sh keeps it here.
+        env:
+          BISMUTH_REQUIRE_QEMU: 1
         run: cargo xtask check

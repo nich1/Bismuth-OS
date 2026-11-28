@@ -16,7 +16,12 @@ description: Prove a change works and collect the evidence a pull request needs.
    *Check:* the same test, the same command, now passing.
 
 3. **Run everything.** `cargo xtask check`.
-   *Check:* it exits successfully. Keep the last lines of output.
+   *Check:* its last line, the verdict, is `check passed`. Keep the output
+   in a file: each step's result is a line starting `check: `, spread
+   through the tools' own output, so pick them out with
+   `grep '^check' <file>`. That also shows the verdict `check passed` or
+   `check FAILED at <step>`, but not the not-run verdict in the table
+   below, which does not start with `check`: read the last line for that.
 
 4. **List what the change adds to the system.** New `unsafe` blocks, system
    calls, message interfaces, components trusted to share memory with the
@@ -37,6 +42,6 @@ description: Prove a change works and collect the evidence a pull request needs.
 | Situation | Do this |
 |---|---|
 | The new test passes without the change | The test proves nothing. Rewrite it |
-| QEMU is not installed | Say the boot test did not run locally. The pull request check will run it |
+| QEMU is not installed | Every other step still runs. The line `check: boot test: NOT RUN: ...` says where it looked, the last line is `boot test NOT RUN: QEMU is not installed`, and the exit code is 3. Say the boot test did not run locally. The pull request check will run it, and there a missing QEMU is a failure |
 | A check fails only on the code host | Read that job's log for the failing step. Do not rerun and hope |
 | A test passes sometimes | Treat it as a bug. Find the cause or delete the test |

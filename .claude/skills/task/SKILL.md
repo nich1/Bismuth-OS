@@ -52,9 +52,10 @@ one holds.
 7. **Document.** If something was added, moved or removed, hand the
    `explainer` agent the change. It updates the explainers in `docs/` and
    checks the map's rows for accuracy and plain wording.
-   *Check:* `cargo xtask check` passes. For the map it catches only a row
-   naming a path that does not exist, so check by eye that every addition
-   has a row.
+   *Check:* the last line of `cargo xtask check` is `check passed`, and its
+   output has a line starting `check: map: ok`. For the map it catches only
+   a row naming a path that does not exist, so check by eye that every
+   addition has a row.
 
 8. **Open the pull request.** Use the `open-pr` skill. If step 6 opened a
    draft, do not open another: push the commits made since then with
