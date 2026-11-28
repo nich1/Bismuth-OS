@@ -34,8 +34,9 @@ tasks:
   snapshot [--update]
           build, then print the footprint report; --update also stores it
           in snapshots/footprint.txt
-  check   everything the pull request check runs: format, lint, unit tests,
-          footprint snapshot, kernel file check, boot scenarios
+  check   what the CI workflow runs on a pull request: feature map check,
+          format, lint, unit tests, footprint snapshot, kernel file check,
+          boot scenarios (not the text checks)
 
 code host tasks (need gh, GitHub's command-line tool):
   issue-list [--label <name>]

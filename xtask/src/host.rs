@@ -178,10 +178,24 @@ fn issue_lines(text: &str) -> Result<Vec<String>> {
 /// The open issues, with `label` if given, one line each. `gh` finds no
 /// issues for a label that does not exist, so an empty list for a label is
 /// checked against the repository's labels, making a misspelt label an error.
+/// An empty label, which gh reads as no filter, and one with a comma, which
+/// it reads as several labels, are refused before gh is called.
 fn list_issues(
     label: Option<&str>,
     mut gh: impl FnMut(&[String]) -> Result<Reply>,
 ) -> Result<Vec<String>> {
+    match label {
+        Some(label) if label.trim().is_empty() => {
+            return Err("the label is empty; give a label name after --label".into());
+        }
+        Some(label) if label.contains(',') => {
+            return Err(format!(
+                "issue-list takes one label, and {label:?} contains a comma, \
+                 which gh would read as several labels"
+            ));
+        }
+        _ => {}
+    }
     let reply = gh(&issue_list_args(label))?;
     if !reply.success {
         return Err(format!("gh issue list failed: {}", reply.stderr.trim()));
@@ -498,9 +512,13 @@ pub fn issue_read(number: &str) -> Result<()> {
 /// Prints each open issue, with `label` if given, as `<number>\t<title>`.
 /// With none, prints nothing on standard output and says so on standard error.
 pub fn issue_list(label: Option<&str>) -> Result<()> {
-    let gh = Gh::new()?;
+    // Signed in on the first call, so a refused label needs no credential.
+    let mut gh: Option<Gh> = None;
     let issues = list_issues(label, |args| {
-        let output = gh.output(args)?;
+        if gh.is_none() {
+            gh = Some(Gh::new()?);
+        }
+        let output = gh.as_ref().expect("set above").output(args)?;
         Ok(Reply {
             success: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -830,6 +848,30 @@ mod tests {
         ]);
         let error = list_issues(Some("papercuts"), gh).unwrap_err();
         assert!(error.contains("no label named \"papercuts\""), "{error}");
+    }
+
+    #[test]
+    fn an_empty_label_is_refused_before_gh_is_called() {
+        // `--label=` would make gh list every issue.
+        for label in ["", "  \t"] {
+            let (calls, gh) = stand_in(vec![reply(true, "19\tx\n", "")]);
+            let error = list_issues(Some(label), gh).unwrap_err();
+            assert_eq!(error, "the label is empty; give a label name after --label");
+            assert!(calls.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_label_with_a_comma_is_refused_before_gh_is_called() {
+        // gh would split it into several labels.
+        let (calls, gh) = stand_in(vec![reply(true, "19\tx\n", "")]);
+        let error = list_issues(Some("papercut,bug"), gh).unwrap_err();
+        assert_eq!(
+            error,
+            "issue-list takes one label, and \"papercut,bug\" contains a comma, \
+             which gh would read as several labels"
+        );
+        assert!(calls.borrow().is_empty());
     }
 
     #[test]
