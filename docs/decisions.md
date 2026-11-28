@@ -51,6 +51,14 @@ agreement.
 - **Speed is checked, not assumed.** Benchmarks for program start, small
   file operations, messaging and page faults run in the pull request checks
   once those features exist. (2026-11-27)
+- **The kernel sits in the top half of the address range.** Every program
+  gets the bottom half to itself, which is what existing software expects
+  and what the compatibility layer needs. The boot stage builds the address
+  tables that put the kernel there. (2026-11-27)
+- **The kernel is linked at a fixed address in the top 2 GiB,** starting at
+  `0xFFFF_FFFF_8000_0000`. The boot stage then needs no relocation code.
+  Loading the kernel at a different address on each boot is left for later
+  and would bring that code back. (2026-11-27)
 
 ## Hardware
 

@@ -1,2 +1,23 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# How the kernel is built. Only the kernel builds for this target, so the boot
+# stage and the host tools never see these flags. They apply to any cargo
+# command run in this repository, but a `RUSTFLAGS` environment variable
+# replaces them.
+#
+# The kernel runs at one fixed address in the top 2 GiB of the address range
+# (see docs/decisions.md), so it is a fixed-address executable rather than
+# position-independent, and the linker places its first byte at
+# 0xFFFF_FFFF_8000_0000. The kernel code model lets code reach any address in
+# that range with signed 32-bit offsets (AMD64 psABI ch. 3.5.1,
+# "Architectural Constraints"). With no relocations left to apply there is
+# nothing to make read-only after loading, so `-z norelro` keeps all writable
+# data in one segment.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "code-model=kernel",
+    "-C", "link-arg=--image-base=0xffffffff80000000",
+    "-C", "link-arg=-znorelro",
+]

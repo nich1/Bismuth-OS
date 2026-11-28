@@ -215,8 +215,9 @@ fn kernel_image() -> PathBuf {
         .join("KERNEL.ELF")
 }
 
-/// Fails unless the kernel file has at least one loadable segment and an
-/// entry point inside an executable one, and describes the file.
+/// Fails unless the kernel file has at least one loadable segment, a layout
+/// with no [`layout_problems`] and an entry point inside an executable
+/// segment, and describes the file.
 fn describe_kernel(bytes: &[u8]) -> Result<String> {
     let elf = bismuth_elf::Elf::parse(bytes)
         .map_err(|error| format!("the ELF reader rejected the kernel: {error:?}"))?;
@@ -243,12 +244,88 @@ fn describe_kernel(bytes: &[u8]) -> Result<String> {
     if elf.segments().next().is_none() {
         return Err(format!("the kernel has no loadable segment:\n{text}"));
     }
+    let segments: Vec<_> = elf.segments().collect();
+    let problems = layout_problems(elf.file_type(), elf.entry(), &segments);
+    if !problems.is_empty() {
+        return Err(format!(
+            "the kernel cannot be mapped as linked:\n  {}\n{text}",
+            problems.join("\n  ")
+        ));
+    }
     match elf.entry_segment() {
         Some(segment) if segment.flags.execute => Ok(text),
         _ => Err(format!(
             "the kernel's entry point is not in an executable segment:\n{text}"
         )),
     }
+}
+
+/// The lowest address the kernel may use: the start of the top 2 GiB of the
+/// address range, where the kernel is linked (see `docs/decisions.md`).
+const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+/// The page size the kernel's segments will be mapped with.
+const PAGE_SIZE: u64 = 4096;
+
+/// Says what in the kernel's layout stops it from being mapped as linked, one
+/// line per problem, or nothing if all is well.
+fn layout_problems(
+    file_type: bismuth_elf::FileType,
+    entry: u64,
+    segments: &[bismuth_elf::Segment],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    // gABI ch. 4, "ELF Header", `e_type`: only `ET_EXEC` runs at the
+    // addresses it names, with no relocation.
+    if file_type != bismuth_elf::FileType::Executable {
+        problems.push(format!(
+            "the file is {file_type:?}, not a fixed-address executable (ET_EXEC)"
+        ));
+    }
+    if entry < KERNEL_BASE {
+        problems.push(format!(
+            "the entry point {entry:#x} is below {KERNEL_BASE:#x}"
+        ));
+    }
+    for (index, segment) in segments.iter().enumerate() {
+        if segment.address < KERNEL_BASE {
+            problems.push(format!(
+                "segment {index} at {:#x} is below {KERNEL_BASE:#x}",
+                segment.address
+            ));
+        }
+        // gABI ch. 5, "Program Loading": a segment is mapped page by page
+        // straight from the file, which needs its address and offset at the
+        // same place in a page.
+        if segment.address % PAGE_SIZE != segment.offset % PAGE_SIZE {
+            problems.push(format!(
+                "segment {index} at {:#x} is at offset {:#x} in the file, a different \
+                 place in its 4 KiB page",
+                segment.address, segment.offset
+            ));
+        }
+    }
+    // Each segment gets its own permissions, so no page may hold two.
+    let pages = |segment: &bismuth_elf::Segment| {
+        let last = segment
+            .address
+            .checked_add(segment.memory_size)?
+            .checked_sub(1)?;
+        (segment.memory_size > 0).then_some((segment.address / PAGE_SIZE, last / PAGE_SIZE))
+    };
+    for (first, a) in segments.iter().enumerate() {
+        for (second, b) in segments.iter().enumerate().skip(first + 1) {
+            if let (Some((a_start, a_end)), Some((b_start, b_end))) = (pages(a), pages(b))
+                && a_start <= b_end
+                && b_start <= a_end
+            {
+                problems.push(format!(
+                    "segments {first} and {second} share the 4 KiB page at {:#x}",
+                    a_start.max(b_start) * PAGE_SIZE
+                ));
+            }
+        }
+    }
+    problems
 }
 
 /// Runs the ELF reader on the kernel file [`build`] produced.
@@ -752,7 +829,12 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Scenario, boot_failure, describe_kernel, paths_in_markdown, scenarios};
+    use super::{
+        KERNEL_BASE, Scenario, boot_failure, describe_kernel, layout_problems, paths_in_markdown,
+        scenarios,
+    };
+    use bismuth_elf::FileType::{Executable, SharedObject};
+    use bismuth_elf::{Flags, Segment};
 
     fn missing() -> Scenario {
         Scenario::error("missing", None, "file not found")
@@ -781,7 +863,7 @@ mod tests {
 
     #[test]
     fn the_scenarios_damage_the_kernel_as_named() {
-        let kernel = kernel_file(0b101, 0x20_0040, 1);
+        let kernel = kernel_file(0b101, KERNEL_BASE + 0x40, 1);
         let all = scenarios(&kernel).expect("scenarios");
         let names: Vec<_> = all.iter().map(|s| s.name).collect();
         assert_eq!(
@@ -790,7 +872,7 @@ mod tests {
         );
         assert_eq!(
             all[0].lines[1],
-            "BISMUTH KERNEL FILE OK entry=0x200040 segments=1 bytes=4096"
+            "BISMUTH KERNEL FILE OK entry=0xffffffff80000040 segments=1 bytes=4096"
         );
         assert_eq!(all[0].exit_code, 33);
         assert_eq!(all[1].kernel, None);
@@ -806,9 +888,9 @@ mod tests {
     }
 
     /// A 4 KiB x86-64 ELF executable whose one program header is a loadable
-    /// segment with `flags`, holding the whole file at 0x20_0000, and whose
-    /// entry is `entry`. Layouts from the gABI "ELF Header" and "Program
-    /// Header" sections.
+    /// segment with `flags`, holding the whole file at [`KERNEL_BASE`], and
+    /// whose entry is `entry`. Layouts from the gABI "ELF Header" and
+    /// "Program Header" sections.
     fn kernel_file(flags: u32, entry: u64, headers: u16) -> Vec<u8> {
         let mut file = vec![0u8; 4096];
         let mut put = |at: usize, bytes: &[u8]| file[at..at + bytes.len()].copy_from_slice(bytes);
@@ -823,7 +905,7 @@ mod tests {
         put(56, &headers.to_le_bytes());
         put(64, &1u32.to_le_bytes()); // PT_LOAD
         put(68, &flags.to_le_bytes());
-        put(80, &0x20_0000u64.to_le_bytes());
+        put(80, &KERNEL_BASE.to_le_bytes());
         put(96, &4096u64.to_le_bytes());
         put(104, &4096u64.to_le_bytes());
         put(112, &4096u64.to_le_bytes());
@@ -832,29 +914,30 @@ mod tests {
 
     #[test]
     fn a_kernel_entered_in_an_executable_segment_passes() {
-        let text = describe_kernel(&kernel_file(0b101, 0x20_0040, 1)).expect("passes");
+        let text = describe_kernel(&kernel_file(0b101, KERNEL_BASE + 0x40, 1)).expect("passes");
         assert_eq!(
             text,
-            "Executable, entry 0x200040, 4096 bytes\n  load 0x200000: 0x1000 bytes from \
-             offset 0x0, 0x1000 in memory, align 0x1000, r-x\n"
+            "Executable, entry 0xffffffff80000040, 4096 bytes\n  load 0xffffffff80000000: \
+             0x1000 bytes from offset 0x0, 0x1000 in memory, align 0x1000, r-x\n"
         );
     }
 
     #[test]
     fn a_kernel_entered_in_a_data_segment_fails() {
-        let error = describe_kernel(&kernel_file(0b110, 0x20_0040, 1)).expect_err("fails");
+        let error = describe_kernel(&kernel_file(0b110, KERNEL_BASE + 0x40, 1)).expect_err("fails");
         assert!(error.contains("not in an executable segment"), "{error}");
     }
 
     #[test]
     fn a_kernel_entered_outside_every_segment_fails() {
-        let error = describe_kernel(&kernel_file(0b101, 0x20_1000, 1)).expect_err("fails");
+        let error =
+            describe_kernel(&kernel_file(0b101, KERNEL_BASE + 0x1000, 1)).expect_err("fails");
         assert!(error.contains("not in an executable segment"), "{error}");
     }
 
     #[test]
     fn a_kernel_without_loadable_segments_fails() {
-        let error = describe_kernel(&kernel_file(0b101, 0x20_0040, 0)).expect_err("fails");
+        let error = describe_kernel(&kernel_file(0b101, KERNEL_BASE + 0x40, 0)).expect_err("fails");
         assert!(error.contains("no loadable segment"), "{error}");
     }
 
@@ -862,6 +945,122 @@ mod tests {
     fn a_file_the_reader_rejects_fails() {
         let error = describe_kernel(&[0x7F, b'E', b'L', b'F']).expect_err("fails");
         assert_eq!(error, "the ELF reader rejected the kernel: Truncated");
+    }
+
+    /// A loadable segment at `address`, read from `offset`, taking `memory`
+    /// bytes, with the kernel linker's 4 KiB alignment.
+    fn segment(address: u64, offset: u64, memory: u64, execute: bool) -> Segment {
+        Segment {
+            offset,
+            file_size: memory,
+            address,
+            memory_size: memory,
+            align: 0x1000,
+            flags: Flags {
+                read: true,
+                write: !execute,
+                execute,
+            },
+        }
+    }
+
+    /// The shape the kernel is linked to: read-only, code and data segments
+    /// on pages of their own, from [`KERNEL_BASE`] up.
+    fn good_layout() -> Vec<Segment> {
+        vec![
+            segment(KERNEL_BASE, 0, 0x274, false),
+            segment(KERNEL_BASE + 0x1280, 0x280, 0x15, true),
+            segment(KERNEL_BASE + 0x2298, 0x298, 0xd68, false),
+        ]
+    }
+
+    #[test]
+    fn the_kernel_layout_passes() {
+        let problems = layout_problems(Executable, KERNEL_BASE + 0x1280, &good_layout());
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn a_position_independent_kernel_fails() {
+        let problems = layout_problems(SharedObject, KERNEL_BASE + 0x1280, &good_layout());
+        assert_eq!(
+            problems,
+            ["the file is SharedObject, not a fixed-address executable (ET_EXEC)"]
+        );
+    }
+
+    #[test]
+    fn a_kernel_entered_below_the_top_2_gib_fails() {
+        let problems = layout_problems(Executable, 0x1280, &good_layout());
+        assert_eq!(
+            problems,
+            ["the entry point 0x1280 is below 0xffffffff80000000"]
+        );
+    }
+
+    #[test]
+    fn a_segment_below_the_top_2_gib_fails() {
+        let mut segments = good_layout();
+        segments[0].address = KERNEL_BASE - 0x1000;
+        let problems = layout_problems(Executable, KERNEL_BASE + 0x1280, &segments);
+        assert_eq!(
+            problems,
+            ["segment 0 at 0xffffffff7ffff000 is below 0xffffffff80000000"]
+        );
+    }
+
+    #[test]
+    fn a_segment_whose_address_and_offset_disagree_fails() {
+        let mut segments = good_layout();
+        segments[1].offset = 0x290;
+        let problems = layout_problems(Executable, KERNEL_BASE + 0x1280, &segments);
+        assert_eq!(
+            problems,
+            [
+                "segment 1 at 0xffffffff80001280 is at offset 0x290 in the file, \
+                 a different place in its 4 KiB page"
+            ]
+        );
+    }
+
+    #[test]
+    fn segments_sharing_a_page_fail() {
+        let mut segments = good_layout();
+        // The code now starts on the read-only segment's last page.
+        segments[1].address = KERNEL_BASE + 0x280;
+        let problems = layout_problems(Executable, KERNEL_BASE + 0x280, &segments);
+        assert_eq!(
+            problems,
+            ["segments 0 and 1 share the 4 KiB page at 0xffffffff80000000"]
+        );
+    }
+
+    #[test]
+    fn segments_ending_and_starting_on_page_edges_do_not_share() {
+        let segments = [
+            segment(KERNEL_BASE, 0, 0x1000, false),
+            segment(KERNEL_BASE + 0x1000, 0x1000, 0x1000, true),
+            // Takes no memory, so no page.
+            segment(KERNEL_BASE + 0x1000, 0x1000, 0, false),
+        ];
+        let problems = layout_problems(Executable, KERNEL_BASE + 0x1000, &segments);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn a_kernel_linked_low_fails_the_file_check() {
+        // gABI ch. 5, "Program Header": `p_vaddr` is the eight bytes at 16.
+        let mut file = kernel_file(0b101, 0x20_0040, 1);
+        file[80..88].copy_from_slice(&0x20_0000u64.to_le_bytes());
+        let error = describe_kernel(&file).expect_err("fails");
+        assert!(
+            error.starts_with(
+                "the kernel cannot be mapped as linked:\n  \
+                 the entry point 0x200040 is below 0xffffffff80000000\n  \
+                 segment 0 at 0x200000 is below 0xffffffff80000000\n"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
