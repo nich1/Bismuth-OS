@@ -1,5 +1,7 @@
 boot image bytes: 110592
 third-party packages: 0
+unsafe blocks in acpi/src/lib.rs: 0
+unsafe blocks in acpi/src/tests.rs: 0
 unsafe blocks in boot/src/cpu.rs: 8
 unsafe blocks in boot/src/load.rs: 0
 unsafe blocks in boot/src/main.rs: 5
@@ -28,6 +30,8 @@ unsafe blocks in kernel/src/port.rs: 3
 unsafe blocks in kernel/src/serial.rs: 3
 unsafe blocks in paging/src/lib.rs: 0
 unsafe blocks in paging/src/tests.rs: 0
+unsafe fn declarations in acpi/src/lib.rs: 0
+unsafe fn declarations in acpi/src/tests.rs: 0
 unsafe fn declarations in boot/src/cpu.rs: 3
 unsafe fn declarations in boot/src/load.rs: 0
 unsafe fn declarations in boot/src/main.rs: 1
