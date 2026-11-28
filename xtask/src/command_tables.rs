@@ -18,6 +18,54 @@ fn usage_commands(usage: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The usage text's lines that [`usage_commands`] would skip although they
+/// could be a command: every line must be blank, a heading (unindented, and
+/// the first line or ending in `:`), a command (two spaces) or a description
+/// (ten spaces, under its command's name). Any other indentation, or a tab,
+/// is reported.
+fn usage_layout_problems(usage: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (index, line) in usage.lines().enumerate() {
+        let text = line.trim_start();
+        let indent = &line[..line.len() - text.len()];
+        let problem = if indent.contains(|c| c != ' ') {
+            "is not indented with spaces only".to_string()
+        } else if text.is_empty() || matches!(indent.len(), 2 | 10) {
+            continue;
+        } else if indent.is_empty() {
+            if index == 0 || text.ends_with(':') {
+                continue;
+            }
+            "is not a heading ending in `:`".to_string()
+        } else {
+            format!("is indented by {} spaces", indent.len())
+        };
+        problems.push(format!("line {} {problem}: {line:?}", index + 1));
+    }
+    problems
+}
+
+/// The commands `main()` accepts: the first word of each pattern of its
+/// `match args[..]`, in the layout `cargo fmt` gives it, with an arm's
+/// pattern starting `["` or on its own line after `[`, eight spaces in.
+fn dispatched_commands(source: &str) -> Vec<&str> {
+    let (_, arms) = source
+        .split_once("let result = match args[..] {\n")
+        .expect("main() matches on args[..]");
+    let arms = arms.split("\n        _ =>").next().unwrap_or("");
+    let mut lines = arms.lines();
+    let mut commands = Vec::new();
+    while let Some(line) = lines.next() {
+        let pattern = match line.strip_prefix("        [") {
+            Some("") => lines.next().unwrap_or("").trim_start(),
+            Some(pattern) => pattern,
+            None => continue,
+        };
+        commands.extend(pattern.split('"').nth(1));
+    }
+    commands
+}
+
 /// The commands a document's command table names: the table whose header
 /// starts `| Command |`, and in the first cell of each row every code span,
 /// without `cargo xtask ` and without anything after the command's name.
@@ -80,6 +128,44 @@ fn the_usage_text_is_read_as_its_commands() {
     assert!(
         real.contains(&"build") && real.contains(&"issue-list"),
         "{real:?}"
+    );
+}
+
+#[test]
+fn the_usage_text_has_only_headings_commands_and_descriptions() {
+    assert_eq!(usage_layout_problems(crate::USAGE), Vec::<String>::new());
+    let usage = "usage: cargo xtask <task>\n\ntasks:\n  build   x\n          more of x\n\
+                 \x20  pr-frob\n\tpr-tab\npr-flush\n        short continuation\n";
+    assert_eq!(
+        usage_layout_problems(usage),
+        [
+            "line 6 is indented by 3 spaces: \"   pr-frob\"",
+            "line 7 is not indented with spaces only: \"\\tpr-tab\"",
+            "line 8 is not a heading ending in `:`: \"pr-flush\"",
+            "line 9 is indented by 8 spaces: \"        short continuation\"",
+        ]
+    );
+}
+
+#[test]
+fn the_usage_text_lists_the_commands_main_accepts() {
+    let mut listed = usage_commands(crate::USAGE);
+    let mut accepted = dispatched_commands(include_str!("main.rs"));
+    listed.sort_unstable();
+    accepted.sort_unstable();
+    accepted.dedup();
+    assert_eq!(listed, accepted, "usage text, then main()");
+}
+
+#[test]
+fn the_dispatch_is_read_as_its_commands() {
+    let source = "fn x() {}\nfn main() {\n    let result = match args[..] {\n        \
+                  [\"build\"] => build(false),\n        [\"snapshot\", \"--update\"] => \
+                  snapshot(true),\n        [\n            \"issue-new\",\n            \
+                  \"--title\",\n        ] => x(),\n        _ => {\n        [\"after\"]\n";
+    assert_eq!(
+        dispatched_commands(source),
+        ["build", "snapshot", "issue-new"]
     );
 }
 

@@ -43,8 +43,11 @@ const LOG_TAIL_LINES: usize = 60;
 const CHECKS_JQ: &str = ".[] | [.bucket, .name, .link] | @tsv";
 /// The issue's title and body, then each comment with its author and date.
 const ISSUE_JQ: &str = r#".title + "\n\n" + .body + ([.comments[] | "\n\n--- comment by " + .author.login + ", " + .createdAt + "\n\n" + .body] | join(""))"#;
-/// One line per issue: number and title. `@tsv` writes a tab, newline,
-/// carriage return or backslash in the title as `\t`, `\n`, `\r` or `\\`.
+/// One line per issue: number and title, separated by a tab. `gh --jq` runs
+/// gojq, whose `@tsv` writes a tab, newline, carriage return or backslash in
+/// the title as the two characters `\t`, `\n`, `\r` or `\\`, and leaves every
+/// other character, quotes and commas among them, as it is. [`issue_lines`]
+/// relies on that, and a test pins this filter.
 const LIST_JQ: &str = ".[] | [.number, .title] | @tsv";
 /// More issues than the repository will have open; `gh` stops at 30 without it.
 const LIST_LIMIT: &str = "1000";
@@ -145,9 +148,16 @@ struct Reply {
     stderr: String,
 }
 
+/// True for the characters that change the order text is shown in (the
+/// bidirectional embeddings, overrides and isolates) and the line and
+/// paragraph separators. None of them is a control character.
+fn reorders_text(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}')
+}
+
 /// Reads the lines [`LIST_JQ`] produces as `<number>\t<title>`, escaping any
 /// control character `@tsv` left in the title so it cannot end the line,
-/// move the cursor or clear the screen.
+/// move the cursor or clear the screen, and any character that reorders text.
 fn issue_lines(text: &str) -> Result<Vec<String>> {
     let lines = text.lines().filter(|line| !line.trim().is_empty());
     lines
@@ -158,7 +168,7 @@ fn issue_lines(text: &str) -> Result<Vec<String>> {
                     let title: String = title
                         .chars()
                         .map(|c| {
-                            if c.is_control() {
+                            if c.is_control() || reorders_text(c) {
                                 c.escape_unicode().to_string()
                             } else {
                                 c.to_string()
@@ -250,10 +260,53 @@ fn push_args(branch: &str) -> Result<Vec<String>> {
     }
 }
 
-fn pr_create_args(branch: &str, title: &str, body_file: &str, draft: bool) -> Result<Vec<String>> {
+/// The `git ls-remote` arguments that list origin's branch `base`.
+fn ls_remote_args(base: &str) -> Vec<String> {
+    strings(&["ls-remote", "origin", &format!("refs/heads/{base}")])
+}
+
+/// Refuses a base that gh would read as an option, the branch being pushed,
+/// or a branch origin does not have. `ls_remote` runs `git ls-remote` with
+/// the arguments given and returns what it printed; it is only called for a
+/// name that passes the first two checks.
+fn check_base(
+    branch: &str,
+    base: &str,
+    ls_remote: impl FnOnce(&[String]) -> Result<String>,
+) -> Result<()> {
+    if base.is_empty() || base.starts_with('-') {
+        return Err(format!(
+            "{base:?} is not a branch name; give the base branch after --base"
+        ));
+    }
+    if base == branch {
+        return Err(format!(
+            "the base is the branch being pushed, {branch:?}; give the branch it is stacked on"
+        ));
+    }
+    // The pattern matches every ref ending in it, so only the exact name counts.
+    let wanted = format!("refs/heads/{base}");
+    let listed = ls_remote(&ls_remote_args(base))?;
+    let mut names = listed.lines().filter_map(|line| line.split_once('\t'));
+    if names.any(|(_, name)| name == wanted) {
+        Ok(())
+    } else {
+        Err(format!(
+            "origin has no branch named {base:?} to open the pull request against"
+        ))
+    }
+}
+
+fn pr_create_args(
+    branch: &str,
+    base: &str,
+    title: &str,
+    body_file: &str,
+    draft: bool,
+) -> Result<Vec<String>> {
     check_credit("title", title)?;
     let body = checked_body(body_file)?;
-    let mut args = strings(&["pr", "create", "--base", "main", "--head", branch]);
+    let mut args = strings(&["pr", "create", "--base", base, "--head", branch]);
     args.extend(strings(&["--title", title, "--body-file", &body]));
     if draft {
         args.push("--draft".into());
@@ -545,10 +598,30 @@ pub fn issue_new(title: &str, body_file: &str, label: Option<&str>) -> Result<()
     Gh::new()?.run(&args)
 }
 
-pub fn pr_open(title: &str, body_file: &str, draft: bool) -> Result<()> {
+/// Runs a read-only `git ls-remote`, without letting it prompt, and returns
+/// what it printed. Its errors are shown as git prints them.
+fn ls_remote(args: &[String]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(crate::root())
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|error| format!("could not start git: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("git ls-remote failed ({})", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Pushes the current branch and opens its pull request against `base`.
+/// Every check, the base's among them, runs before anything is pushed.
+pub fn pr_open(title: &str, body_file: &str, base: &str, draft: bool) -> Result<()> {
     let branch = current_branch()?;
-    let create = pr_create_args(&branch, title, body_file, draft)?;
+    let create = pr_create_args(&branch, base, title, body_file, draft)?;
     let push = push_args(&branch)?;
+    check_base(&branch, base, ls_remote)?;
     let gh = Gh::new()?;
     crate::run_checked(
         Command::new("git").current_dir(crate::root()).args(&push),
@@ -789,6 +862,41 @@ mod tests {
         assert!(issue_lines("19\n").is_err());
     }
 
+    #[test]
+    fn the_issue_list_filter_is_the_tsv_that_issue_lines_reads() {
+        // issue_lines reads `<number>\t<title>` with the title escaped as
+        // `@tsv` escapes it, so the filter is pinned here, not just reused.
+        assert_eq!(LIST_JQ, ".[] | [.number, .title] | @tsv");
+        // What `gh --jq` printed for issue 41 titled "a<TAB>b<LF>c<CR>d\e",
+        // and for one titled "plain, \"quoted\"" (`@csv` would quote it).
+        let real = "41\ta\\tb\\nc\\rd\\\\e\n7\tplain, \"quoted\"\n";
+        assert_eq!(
+            issue_lines(real).unwrap(),
+            ["41\ta\\tb\\nc\\rd\\\\e", "7\tplain, \"quoted\""]
+        );
+        assert!(issue_lines("41,\"a\"\n").is_err());
+    }
+
+    #[test]
+    fn non_ascii_controls_and_reordering_characters_are_escaped() {
+        // U+0085 ends a line on some terminals and U+009B starts a control
+        // sequence; neither is ASCII.
+        let text = "5\tnext\u{85}line \u{9b}2J\n";
+        assert_eq!(issue_lines(text).unwrap(), ["5\tnext\\u{85}line \\u{9b}2J"]);
+        // These reorder text on screen or break the line, without being
+        // control characters.
+        for c in [
+            '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}', '\u{2028}', '\u{2029}',
+        ] {
+            let shown = &issue_lines(&format!("6\ta{c}b\n")).unwrap()[0];
+            assert_eq!(*shown, format!("6\ta{}b", c.escape_unicode()));
+        }
+        // Their neighbours, and other non-ASCII text, are left alone.
+        let text = "8\t\u{2029}\u{2065}\u{202f}\u{2027} é 中\n";
+        let kept = &issue_lines(text).unwrap()[0];
+        assert_eq!(kept, "8\t\\u{2029}\u{2065}\u{202f}\u{2027} é 中");
+    }
+
     /// The argument lists a stand-in `gh` was called with.
     type Calls = std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>;
 
@@ -898,7 +1006,7 @@ mod tests {
     fn pr_args() {
         let body = temp_file("pr.md", "fine\n");
         assert_eq!(
-            pr_create_args("feat/x", "feat: x", &body, false).unwrap(),
+            pr_create_args("feat/x", "main", "feat: x", &body, false).unwrap(),
             [
                 "pr",
                 "create",
@@ -913,11 +1021,20 @@ mod tests {
             ]
         );
         assert_eq!(
-            pr_create_args("feat/x", "feat: x", &body, true)
-                .unwrap()
-                .last()
-                .unwrap(),
-            "--draft"
+            pr_create_args("feat/y", "feat/x", "feat: y", &body, true).unwrap(),
+            [
+                "pr",
+                "create",
+                "--base",
+                "feat/x",
+                "--head",
+                "feat/y",
+                "--title",
+                "feat: y",
+                "--body-file",
+                &body,
+                "--draft"
+            ]
         );
         assert_eq!(
             pr_number_args(),
@@ -952,6 +1069,76 @@ mod tests {
         assert_eq!(pr_checks_args(Some("17"))[2], "17");
     }
 
+    /// What `git ls-remote origin refs/heads/<name>` printed, as a stand-in
+    /// for it that records the arguments it was given.
+    fn ls_remote_printing(printed: &str) -> (Calls, impl FnOnce(&[String]) -> Result<String> + '_) {
+        let calls = Calls::default();
+        let seen = calls.clone();
+        let ls_remote = move |args: &[String]| {
+            seen.borrow_mut().push(args.to_vec());
+            Ok(printed.to_string())
+        };
+        (calls, ls_remote)
+    }
+
+    #[test]
+    fn a_base_origin_has_is_accepted() {
+        let printed = "1f2e3d4c\trefs/heads/feat/x\r\n";
+        let (calls, ls_remote) = ls_remote_printing(printed);
+        assert_eq!(check_base("feat/y", "feat/x", ls_remote), Ok(()));
+        let args = ["ls-remote", "origin", "refs/heads/feat/x"];
+        assert_eq!(*calls.borrow(), [args]);
+        let (_, ls_remote) = ls_remote_printing("9a8b\trefs/heads/main\n");
+        assert_eq!(check_base("feat/y", "main", ls_remote), Ok(()));
+    }
+
+    #[test]
+    fn a_base_origin_does_not_have_is_refused() {
+        // A pattern matches every ref that ends in it, so `x/main` is listed
+        // for `main` too; only the exact name counts.
+        for printed in ["", "9a8b\trefs/heads/x/refs/heads/main\n"] {
+            let (_, ls_remote) = ls_remote_printing(printed);
+            assert_eq!(
+                check_base("feat/y", "main", ls_remote),
+                Err("origin has no branch named \"main\" to open the pull request against".into())
+            );
+        }
+        let failed = |_: &[String]| Err("git ls-remote failed (exit code: 128)".into());
+        let error = check_base("feat/y", "main", failed).unwrap_err();
+        assert_eq!(error, "git ls-remote failed (exit code: 128)");
+    }
+
+    #[test]
+    fn a_base_that_is_an_option_or_the_branch_is_refused_before_git_is_asked() {
+        let refusals = [
+            (
+                "feat/y",
+                "--draft",
+                "\"--draft\" is not a branch name; give the base branch after --base",
+            ),
+            (
+                "feat/y",
+                "-x",
+                "\"-x\" is not a branch name; give the base branch after --base",
+            ),
+            (
+                "feat/y",
+                "",
+                "\"\" is not a branch name; give the base branch after --base",
+            ),
+            (
+                "feat/y",
+                "feat/y",
+                "the base is the branch being pushed, \"feat/y\"; give the branch it is stacked on",
+            ),
+        ];
+        for (branch, base, message) in refusals {
+            let (calls, ls_remote) = ls_remote_printing("9a8b\trefs/heads/feat/y\n");
+            assert_eq!(check_base(branch, base, ls_remote), Err(message.into()));
+            assert!(calls.borrow().is_empty());
+        }
+    }
+
     #[test]
     fn every_command_that_sends_text_checks_it_first() {
         let clean = temp_file("clean.md", "fine\n");
@@ -959,8 +1146,8 @@ mod tests {
         assert!(issue_comment_args("7", &credit).is_err());
         assert!(issue_new_args("chore: x", &credit, None).is_err());
         assert!(issue_new_args("chore: thanks Claude", &clean, None).is_err());
-        assert!(pr_create_args("feat/x", "feat: x", &credit, false).is_err());
-        assert!(pr_create_args("feat/x", "feat: thanks Claude", &clean, false).is_err());
+        assert!(pr_create_args("feat/x", "main", "feat: x", &credit, false).is_err());
+        assert!(pr_create_args("feat/x", "main", "feat: thanks Claude", &clean, false).is_err());
         assert!(pr_edit_args("18", &credit).is_err());
     }
 

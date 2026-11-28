@@ -46,8 +46,9 @@ code host tasks (need gh, GitHub's command-line tool):
   issue-read <number>
   issue-comment <number> --body-file <path>
   issue-new --title <text> --body-file <path> [--label <name>]
-  pr-open --title <text> --body-file <path> [--draft]
-          push the current branch and open a pull request against main
+  pr-open --title <text> --body-file <path> [--base <branch>] [--draft]
+          push the current branch and open a pull request against the
+          base branch, main unless given
   pr-edit --body-file <path>
   pr-ready
   pr-wait [<number>]
@@ -99,10 +100,31 @@ fn main() -> ExitCode {
             "--label",
             label,
         ] => host::issue_new(title, body, Some(label)),
-        ["pr-open", "--title", title, "--body-file", body] => host::pr_open(title, body, false),
-        ["pr-open", "--title", title, "--body-file", body, "--draft"] => {
-            host::pr_open(title, body, true)
+        ["pr-open", "--title", title, "--body-file", body] => {
+            host::pr_open(title, body, "main", false)
         }
+        ["pr-open", "--title", title, "--body-file", body, "--draft"] => {
+            host::pr_open(title, body, "main", true)
+        }
+        [
+            "pr-open",
+            "--title",
+            title,
+            "--body-file",
+            body,
+            "--base",
+            base,
+        ] => host::pr_open(title, body, base, false),
+        [
+            "pr-open",
+            "--title",
+            title,
+            "--body-file",
+            body,
+            "--base",
+            base,
+            "--draft",
+        ] => host::pr_open(title, body, base, true),
         ["pr-edit", "--body-file", body] => host::pr_edit(body),
         ["pr-ready"] => host::pr_ready(),
         ["pr-wait"] => host::pr_wait(None),
