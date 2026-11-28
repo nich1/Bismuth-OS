@@ -1,9 +1,11 @@
 # The hand-off structure
 
-This explains what the boot stage will tell the kernel when it starts it,
-how that is laid out in memory, and why it is laid out this way. The code
-is the `handoff` library (`bismuth-handoff`). Nothing uses it yet: a later
-task has the boot stage fill it in and the kernel read it.
+This explains what the boot stage tells the kernel when it starts it, how
+that is laid out in memory, and why it is laid out this way. The code is
+the `handoff` library (`bismuth-handoff`). The boot stage fills it in
+(`boot/src/handoff.rs`) and the kernel reads it (`kernel/src/main.rs`);
+"How the boot stage fills it in" and "How the kernel reads it" below say
+how.
 
 ## What it is and why the kernel gets its own format
 
@@ -154,6 +156,66 @@ one page, ends at or below 2^52 and starts at or after the end of the one
 before. Then it offers the regions in order and the total number of usable
 pages.
 
+## How the boot stage fills it in
+
+Allocating changes the firmware's memory map, so everything the
+structure needs is allocated before the map is read for the last time,
+and the structure is written after boot services have ended, from that
+map (`docs/boot.md`, "Leaving the firmware"):
+
+- **The window,** 8 pages of loader data allocated with the kernel's
+  stack, mapped read-only and not executable at `0xFFFF_FFFF_7FFE_0000`
+  in the kernel's tables (`HANDOFF_ADDRESS` and `HANDOFF_PAGES` in
+  `elf/src/place.rs`). 32 KiB holds 1364 regions; a map that needs more
+  stops the boot with `BISMUTH HANDOFF ERROR: the structure needs ...
+  bytes, more than the window's 32768`.
+- **The builder's working space,** whole pages of loader data allocated
+  between the map's buffer and the final read, with one region for each
+  descriptor the map's buffer could hold and two for each range set aside
+  for the kernel.
+
+Then every descriptor of the map goes to `add_firmware`, stepping by the
+entry size the firmware states. A descriptor whose attributes carry
+`EFI_MEMORY_SP` (UEFI 2.10, section 7.2, "Memory Attribute
+Definitions"), memory set aside for a specific purpose, goes in as
+`EfiReservedMemoryType` whatever its type, since the builder sees only
+the type and such memory is not for general use. Then each range that is
+now the kernel's goes to `set_aside_for_kernel`, and the structure is
+written into the window. Every refusal stops the boot with a line
+starting `BISMUTH HANDOFF ERROR:`.
+
+**What counts as the kernel's own:** each loaded segment's pages, the
+stack's 16 pages and the whole block of 54 table frames, used or not.
+The kernel runs from all of them, and the tables in use are made of the
+last. All are loader data, so all lie in loader memory, as the builder
+requires. **What stays loader memory:** the boot stage's own code and
+data, the kernel file it read, the memory map's buffer, the builder's
+working space and the window itself: the kernel may reuse them once it
+runs on tables of its own and has copied out what it needs from the
+structure.
+
+## How the kernel reads it
+
+The boot stage passes the window's address in `rdi`, and the kernel's
+entry receives it as its first argument. After its entry checks the
+kernel checks the address (in the top half, on a page, and the window's
+address), takes exactly the window's 32 KiB as bytes, and calls
+`Handoff::read`. It prints `BISMUTH KERNEL MEMORY regions=<n>
+usable=<pages> kernel=<pages>`: the regions, the reader's usable pages and
+the sum of the regions of the kernel's kind. A refusal prints `BISMUTH
+KERNEL HANDOFF ERROR:` and the reason, and stops with the kernel's
+failure code.
+
+The kernel may use the usable regions at once, keeps its own, and must
+still not reuse boot-services memory: the lower levels of the tables it
+runs on are the firmware's, in boot-services data, and so are the
+firmware's interrupt table and, in boot-services code, the handlers it
+points to. That memory is free only once the kernel runs on address
+tables and descriptor tables of its own. The reader borrows the window's
+bytes, which are loader memory, so the kernel must copy the regions out
+before it reuses loader memory. The kernel does not reclaim or allocate
+anything yet.
+
 ## How it is tested
 
 `cargo xtask check` runs the library's unit tests (`handoff/src/tests.rs`).
@@ -165,7 +227,9 @@ tables above, not by the builder, so the two cannot share a mistake.
    is usable.
 2. **Builder tests** for setting aside from the middle, the start and the
    end of a region and across several, merging, unsorted and overlapping
-   input, every refusal, and space that is exactly full and one short.
+   input, every refusal, space that is exactly full and one short, and
+   that the last four bytes of each entry are written as zero over bytes
+   that were not.
 3. **A randomised test** builds 20,000 random maps, compares the result of
    every step with a simple model (a table from page number to kind,
    including the error the model expects), then reads the written
@@ -174,3 +238,12 @@ tables above, not by the builder, so the two cannot share a mistake.
    damages a valid structure 50,000 times (random bytes, fields set to
    values at the edges, truncation) and checks that the reader never
    panics and never reports a region outside the bytes or out of order.
+
+The boot stage's use of it is tested on the development machine through
+`xtask` (`boot/src/handoff.rs`: setting the kernel's ranges aside,
+specific-purpose memory, the working space exactly enough and one short,
+each refusal, the stated stride), and in QEMU by `cargo xtask test`,
+which requires the kernel's usable pages to equal the boot stage's own
+count and the kernel's pages to equal what the kernel file and the
+constants give, and boots a structure with a damaged marker
+(`docs/boot.md`, "How it is tested").

@@ -214,6 +214,24 @@ fn the_written_layout_is_the_documented_one() {
 }
 
 #[test]
+fn the_spare_bytes_of_each_entry_are_written_as_zero() {
+    let mut space = [Region::default(); 4];
+    let mut builder = Builder::new(&mut space);
+    builder.add_firmware(CONVENTIONAL, 0, 16).unwrap();
+    builder.add_firmware(LOADER_DATA, 16 * PAGE, 4).unwrap();
+    builder.add_firmware(BOOT_DATA, 0x10_0000, 2).unwrap();
+    // Bytes that were never zero, as memory reused for the structure may be.
+    let mut out = [0xA5u8; 256];
+    let length = builder.write(&mut out).unwrap();
+    assert_eq!(length, HEADER_SIZE + 3 * REGION_SIZE);
+    for entry in out[HEADER_SIZE..length].chunks_exact(REGION_SIZE) {
+        assert_eq!(entry[20..24], [0; 4], "{entry:02x?}");
+    }
+    // Bytes past the structure are left as they were.
+    assert!(out[length..].iter().all(|&byte| byte == 0xA5));
+}
+
+#[test]
 fn setting_aside_from_the_middle_of_a_region() {
     let mut space = [Region::default(); 4];
     let mut builder = Builder::new(&mut space);

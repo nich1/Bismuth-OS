@@ -34,6 +34,10 @@ version = "0.0.0"
 [[package]]
 name = "bismuth-kernel"
 version = "0.0.0"
+dependencies = [
+ "bismuth-elf",
+ "bismuth-handoff",
+]
 
 [[package]]
 name = "bismuth-paging"
@@ -44,5 +48,6 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "bismuth-elf",
+ "bismuth-handoff",
  "bismuth-paging",
 ]

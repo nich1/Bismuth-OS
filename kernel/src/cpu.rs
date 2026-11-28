@@ -11,11 +11,13 @@ use core::arch::{asm, naked_asm};
 /// compiled code may change the stack pointer before its first line runs.
 /// It then puts the processor in the state the System V AMD64 psABI,
 /// section 3.2 "Function Calling Sequence", promises a function on entry,
-/// whatever it was given, and calls [`crate::kernel_main`] with what it
-/// recorded, which checks it against the entry contract:
+/// whatever it was given, and calls [`crate::kernel_main`] with the
+/// hand-off structure's address and what it recorded, which checks them
+/// against the entry contract. The boot stage leaves the address in `rdi`,
+/// the first argument's register, which the stub does not touch:
 ///
-/// 1. `mov rdi, rsp`: the stack pointer, the first argument.
-/// 2. `pushfq`, `pop rsi`: `RFLAGS`, the second argument. This uses the
+/// 1. `mov rsi, rsp`: the stack pointer, the second argument.
+/// 2. `pushfq`, `pop rdx`: `RFLAGS`, the third argument. This uses the
 ///    eight bytes below the stack pointer and leaves it as it was.
 /// 3. `cld`: the compiler relies on the direction flag being clear.
 /// 4. `and rsp, -16`, `call`: the call pushes its return address on a
@@ -35,11 +37,11 @@ pub extern "sysv64" fn _start() -> ! {
     // contract gives (`docs/boot.md`): at least 16 writable bytes below
     // the stack pointer, which steps 2 and 4 use. Nothing else is read or
     // written, and `kernel_main` is an `extern "sysv64"` function taking
-    // two `u64`s, in `rdi` and `rsi`, that never returns.
+    // three `u64`s, in `rdi`, `rsi` and `rdx`, that never returns.
     naked_asm!(
-        "mov rdi, rsp",
+        "mov rsi, rsp",
         "pushfq",
-        "pop rsi",
+        "pop rdx",
         "cld",
         "and rsp, -16",
         "call {main}",

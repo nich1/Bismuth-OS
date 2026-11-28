@@ -32,9 +32,22 @@ const ERROR: Status = 1 << 63;
 /// each). The firmware may use a larger stride, which it states, so that
 /// it can add fields; never a smaller one.
 pub const DESCRIPTOR_SIZE: usize = 40;
-/// Where the type and the number of 4 KiB pages are in a descriptor.
+/// Where the type, the physical start, the number of 4 KiB pages and the
+/// attributes are in a descriptor.
 const AT_TYPE: usize = 0;
+const AT_START: usize = 8;
 const AT_PAGES: usize = 24;
+const AT_ATTRIBUTE: usize = 32;
+
+/// `EFI_MEMORY_SP`, an attribute bit of a descriptor (section 7.2,
+/// `GetMemoryMap()`, "Memory Attribute Definitions"): the memory is set
+/// aside for a specific purpose, such as a device's or an application's,
+/// and is not for general use even when its type is conventional memory.
+pub const MEMORY_SP: u64 = 0x0000_0000_0004_0000;
+/// `EfiReservedMemoryType` (section 7.2): what a descriptor marked
+/// [`MEMORY_SP`] is treated as, so it is never counted or handed on as
+/// usable.
+pub const RESERVED_TYPE: u32 = 0;
 
 /// How many descriptors more than the firmware asks for the map's buffer
 /// has room for. Allocating the buffer itself changes the map: the pool
@@ -73,6 +86,18 @@ pub trait Firmware {
     /// Section 7.4, `ExitBootServices()` with this program's image handle
     /// and `key`.
     fn exit(&mut self, key: usize) -> Status;
+    /// Section 7.2, `AllocatePages()`: working space for the hand-off
+    /// builder, for a map of at most `descriptors` descriptors, as loader
+    /// data in whole pages, kept. Returns the status, `None` when there is
+    /// no service.
+    fn allocate_space(&mut self, descriptors: usize) -> Result<(), Option<Status>>;
+}
+
+/// The most descriptors a map read into a buffer of `capacity` bytes can
+/// hold: [`read_map`] refuses a stride below [`DESCRIPTOR_SIZE`], whatever
+/// the size query said.
+pub fn most_descriptors(capacity: usize) -> usize {
+    capacity / DESCRIPTOR_SIZE
 }
 
 /// The memory map as it was when boot services ended, in memory that
@@ -85,7 +110,7 @@ pub trait Firmware {
     not(test),
     expect(
         dead_code,
-        reason = "the hand-off to the kernel (issue 22) reads the descriptor version"
+        reason = "the descriptor version is kept for a later hand-off of the runtime services"
     )
 )]
 pub struct Map {
@@ -109,6 +134,9 @@ pub enum ExitFailure {
     SizeQuery(Status),
     /// No buffer for the map: the status, `None` when there is no service.
     Allocate(Option<Status>),
+    /// No working space for the hand-off builder: the status, `None` when
+    /// there is no service.
+    Space(Option<Status>),
     /// Reading the map into the buffer failed with this status.
     ReadMap(Status),
     /// The map needs more than the buffer holds.
@@ -130,22 +158,30 @@ pub enum ExitFailure {
 /// Reads the memory map and ends boot services with its key.
 ///
 /// First the size the map needs, then a buffer of that size with room for
-/// [`SPARE_DESCRIPTORS`] more, then the map into it, then
-/// `ExitBootServices()`. If that says the key is stale, the map changed in
-/// between: it is read again into the same buffer, without allocating, and
-/// `ExitBootServices()` is tried once more. After a failed
-/// `ExitBootServices()` only `GetMemoryMap()` is called, which the
-/// specification allows (section 7.4).
+/// [`SPARE_DESCRIPTORS`] more, then the hand-off builder's working space
+/// for as many descriptors as that buffer can hold, then the map into the
+/// buffer, then `ExitBootServices()`. Both allocations come before the
+/// read, since any allocation changes the map. If `ExitBootServices()` says
+/// the key is stale, the map changed in between: it is read again into the
+/// same buffer, without allocating, and `ExitBootServices()` is tried once
+/// more. After a failed `ExitBootServices()` only `GetMemoryMap()` is
+/// called, which the specification allows (section 7.4).
 pub fn leave(firmware: &mut impl Firmware) -> Result<Map, ExitFailure> {
     let query = firmware.memory_map();
     if query.status != BUFFER_TOO_SMALL {
         return Err(ExitFailure::SizeQuery(query.status));
     }
-    // A size too large to allocate makes the allocation fail.
+    // The specification promises only the size with this answer, so a
+    // descriptor size left at zero still gets room for the spare
+    // descriptors. A size too large to allocate makes the allocation fail.
+    let stride = query.descriptor_size.max(DESCRIPTOR_SIZE);
     let capacity = query
         .size
-        .saturating_add(SPARE_DESCRIPTORS.saturating_mul(query.descriptor_size));
+        .saturating_add(SPARE_DESCRIPTORS.saturating_mul(stride));
     let address = firmware.allocate(capacity).map_err(ExitFailure::Allocate)?;
+    firmware
+        .allocate_space(most_descriptors(capacity))
+        .map_err(ExitFailure::Space)?;
     let mut map = read_map(firmware, capacity)?;
     let mut status = firmware.exit(map.key);
     if status == INVALID_PARAMETER {
@@ -185,30 +221,61 @@ fn read_map(firmware: &mut impl Firmware, capacity: usize) -> Result<MapRead, Ex
     Ok(map)
 }
 
-/// The number of descriptors in `map`, stepping by `descriptor_size`, and
-/// the total pages of those whose type `usable` accepts. A stride below
-/// [`DESCRIPTOR_SIZE`] counts nothing.
-pub fn count(map: &[u8], descriptor_size: usize, usable: impl Fn(u32) -> bool) -> (u64, u64) {
-    if descriptor_size < DESCRIPTOR_SIZE {
-        return (0, 0);
-    }
-    let mut descriptors: u64 = 0;
-    let mut pages: u64 = 0;
-    for descriptor in map.chunks_exact(descriptor_size) {
-        descriptors += 1;
-        let field = |at: usize, bytes: &mut [u8]| {
-            let len = bytes.len();
-            bytes.copy_from_slice(&descriptor[at..at + len]);
+/// One descriptor of the map, as the boot stage hands it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Descriptor {
+    /// Its `EFI_MEMORY_TYPE`, or [`RESERVED_TYPE`] if it is marked
+    /// [`MEMORY_SP`].
+    pub firmware_type: u32,
+    /// Its physical start.
+    pub start: u64,
+    /// Its number of 4 KiB pages.
+    pub pages: u64,
+}
+
+/// The descriptors in `map`, stepping by `descriptor_size`. A stride below
+/// [`DESCRIPTOR_SIZE`] gives none, and a trailing piece shorter than a
+/// descriptor is not one.
+pub fn descriptors(map: &[u8], descriptor_size: usize) -> impl Iterator<Item = Descriptor> + '_ {
+    let stride = if descriptor_size < DESCRIPTOR_SIZE {
+        usize::MAX
+    } else {
+        descriptor_size
+    };
+    map.chunks_exact(stride).map(|descriptor| {
+        let field = |at: usize| {
+            let mut bytes = [0; 8];
+            bytes.copy_from_slice(&descriptor[at..at + 8]);
+            u64::from_le_bytes(bytes)
         };
-        let mut kind = [0; 4];
-        field(AT_TYPE, &mut kind);
-        if usable(u32::from_le_bytes(kind)) {
-            let mut count = [0; 8];
-            field(AT_PAGES, &mut count);
-            pages = pages.saturating_add(u64::from_le_bytes(count));
+        let firmware_type = field(AT_TYPE) as u32;
+        let special = field(AT_ATTRIBUTE) & MEMORY_SP != 0;
+        Descriptor {
+            firmware_type: if special {
+                RESERVED_TYPE
+            } else {
+                firmware_type
+            },
+            start: field(AT_START),
+            pages: field(AT_PAGES),
+        }
+    })
+}
+
+/// The number of descriptors in `map`, stepping by `descriptor_size`, and
+/// the total pages of those whose type `usable` accepts, as
+/// [`descriptors`] gives them. A stride below [`DESCRIPTOR_SIZE`] counts
+/// nothing.
+pub fn count(map: &[u8], descriptor_size: usize, usable: impl Fn(u32) -> bool) -> (u64, u64) {
+    let mut count: u64 = 0;
+    let mut pages: u64 = 0;
+    for descriptor in descriptors(map, descriptor_size) {
+        count += 1;
+        if usable(descriptor.firmware_type) {
+            pages = pages.saturating_add(descriptor.pages);
         }
     }
-    (descriptors, pages)
+    (count, pages)
 }
 
 #[cfg(test)]
@@ -219,6 +286,7 @@ mod tests {
     enum Call {
         Map { buffer: bool },
         Allocate(usize),
+        Space(usize),
         Exit(usize),
     }
 
@@ -226,6 +294,7 @@ mod tests {
     struct Script {
         maps: Vec<MapRead>,
         allocation: Result<u64, Option<Status>>,
+        space: Result<(), Option<Status>>,
         exits: Vec<Status>,
         calls: Vec<Call>,
         buffer: bool,
@@ -248,6 +317,10 @@ mod tests {
             self.calls.push(Call::Exit(key));
             assert!(!self.exits.is_empty(), "more exits than scripted");
             self.exits.remove(0)
+        }
+        fn allocate_space(&mut self, descriptors: usize) -> Result<(), Option<Status>> {
+            self.calls.push(Call::Space(descriptors));
+            self.space
         }
     }
 
@@ -276,6 +349,7 @@ mod tests {
         Script {
             maps: all,
             allocation: Ok(ADDRESS),
+            space: Ok(()),
             exits: exits.to_vec(),
             calls: Vec::new(),
             buffer: false,
@@ -289,10 +363,13 @@ mod tests {
         (result, script.calls)
     }
 
-    /// The calls up to and including the first read into the buffer.
-    const START: [Call; 3] = [
+    /// The calls up to and including the first read into the buffer: the
+    /// working space is for as many descriptors of the specification's 40
+    /// bytes as the buffer holds.
+    const START: [Call; 4] = [
         Call::Map { buffer: false },
         Call::Allocate(CAPACITY),
+        Call::Space(CAPACITY / 40),
         Call::Map { buffer: true },
     ];
 
@@ -444,14 +521,88 @@ mod tests {
         assert_eq!(result.map(|map| map.descriptor_size), Ok(DESCRIPTOR_SIZE));
     }
 
-    /// A descriptor of `stride` bytes: type and pages where section 7.2
-    /// puts them, every other byte 0xA5, so a wrong stride or offset reads
+    /// A descriptor of `stride` bytes with the attributes `attribute`:
+    /// type, start, pages and attributes where section 7.2 puts them (at
+    /// 0, 8, 24 and 32, written here as numbers, not the constants under
+    /// test), every other byte 0xA5, so a wrong stride or offset reads
     /// something else.
-    fn descriptor(stride: usize, kind: u32, pages: u64) -> Vec<u8> {
+    fn marked(stride: usize, kind: u32, start: u64, pages: u64, attribute: u64) -> Vec<u8> {
         let mut bytes = vec![0xA5; stride];
-        bytes[AT_TYPE..AT_TYPE + 4].copy_from_slice(&kind.to_le_bytes());
-        bytes[AT_PAGES..AT_PAGES + 8].copy_from_slice(&pages.to_le_bytes());
+        bytes[0..4].copy_from_slice(&kind.to_le_bytes());
+        bytes[8..16].copy_from_slice(&start.to_le_bytes());
+        bytes[24..32].copy_from_slice(&pages.to_le_bytes());
+        bytes[32..40].copy_from_slice(&attribute.to_le_bytes());
         bytes
+    }
+
+    /// As [`marked`], with no attributes and a start of its own.
+    fn descriptor(stride: usize, kind: u32, pages: u64) -> Vec<u8> {
+        marked(stride, kind, 0x1000 * pages, pages, 0)
+    }
+
+    #[test]
+    fn the_descriptors_are_read_at_their_offsets() {
+        let mut map = marked(STRIDE, 7, 0x10_0000, 16, 0xF);
+        map.extend(marked(STRIDE, 4, 0x20_0000, 3, 0));
+        let read: Vec<_> = descriptors(&map, STRIDE).collect();
+        assert_eq!(
+            read,
+            [
+                Descriptor {
+                    firmware_type: 7,
+                    start: 0x10_0000,
+                    pages: 16
+                },
+                Descriptor {
+                    firmware_type: 4,
+                    start: 0x20_0000,
+                    pages: 3
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn specific_purpose_memory_is_reserved_and_not_usable() {
+        // EFI_MEMORY_SP is bit 18 of the attributes (section 7.2).
+        let special = 1 << 18;
+        let mut map = marked(STRIDE, 7, 0x10_0000, 16, special);
+        map.extend(marked(STRIDE, 7, 0x20_0000, 5, special | 0xF));
+        map.extend(marked(STRIDE, 7, 0x30_0000, 2, !special));
+        let types: Vec<_> = descriptors(&map, STRIDE).map(|d| d.firmware_type).collect();
+        assert_eq!(types, [0, 0, 7]);
+        assert_eq!(count(&map, STRIDE, |kind| kind == 7), (3, 2));
+        // Another type marked so stays reserved too.
+        let map = marked(STRIDE, 4, 0x10_0000, 1, special);
+        assert_eq!(
+            descriptors(&map, STRIDE).next().map(|d| d.firmware_type),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_size_query_without_a_descriptor_size_still_leaves_room_to_spare() {
+        let mut query = read(BUFFER_TOO_SMALL, NEEDED, 0);
+        query.descriptor_size = 0;
+        let mut script = script(&[read(SUCCESS, NEEDED, 7)], &[SUCCESS]);
+        script.maps[0] = query;
+        let (result, made) = run(script);
+        assert!(result.is_ok(), "{result:?}");
+        // Room for eight descriptors of the specification's 40 bytes.
+        let capacity = NEEDED + SPARE_DESCRIPTORS * 40;
+        assert_eq!(made[1], Call::Allocate(capacity));
+        assert_eq!(made[2], Call::Space(capacity / 40));
+    }
+
+    #[test]
+    fn no_working_space_is_an_error_and_reads_nothing() {
+        for refusal in [Some(OUT_OF_RESOURCES), None] {
+            let mut script = script(&[], &[]);
+            script.space = Err(refusal);
+            let (result, made) = run(script);
+            assert_eq!(result, Err(ExitFailure::Space(refusal)));
+            assert_eq!(made, START[..3]);
+        }
     }
 
     #[test]
@@ -468,9 +619,9 @@ mod tests {
         // The specification's size is a stride like any other.
         let map: Vec<u8> = [(7, 3), (7, 4)]
             .iter()
-            .flat_map(|&(kind, pages)| descriptor(DESCRIPTOR_SIZE, kind, pages))
+            .flat_map(|&(kind, pages)| descriptor(40, kind, pages))
             .collect();
-        assert_eq!(count(&map, DESCRIPTOR_SIZE, conventional), (2, 7));
+        assert_eq!(count(&map, 40, conventional), (2, 7));
         assert_eq!(count(&[], STRIDE, conventional), (0, 0));
     }
 
