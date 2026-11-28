@@ -3,12 +3,14 @@
 //! The firmware (UEFI) loads this program from the boot disk and calls
 //! [`efi_main`]. It writes one line to the serial port and one to the
 //! firmware console, reads the kernel file from the disk it was loaded from
-//! and checks it with the ELF reader, reports the result on the serial port,
-//! then stops. Loading the kernel comes later. See `docs/boot.md`.
+//! and checks it with the ELF reader, copies its segments into memory,
+//! reports each step on the serial port, then stops. Starting the kernel
+//! comes later. See `docs/boot.md`.
 
 #![no_std]
 #![no_main]
 
+mod load;
 mod port;
 mod report;
 mod serial;
@@ -61,8 +63,25 @@ pub unsafe extern "efiapi" fn efi_main(
     serial.write_str(line.as_str());
     serial.write_str("\n");
 
+    let copied = match (&checked, &boot_services) {
+        (Ok((bytes, elf)), Some(boot_services)) => {
+            Some(load::Kernel::copy(boot_services, bytes, elf))
+        }
+        _ => None,
+    };
+    if let Some(copied) = &copied {
+        let line = match copied {
+            Ok(kernel) => {
+                report::copied_line(kernel.segments().count(), kernel.pages(), kernel.sum())
+            }
+            Err(failure) => report::place_error_line(failure),
+        };
+        serial.write_str(line.as_str());
+        serial.write_str("\n");
+    }
+
     #[cfg(feature = "qemu-exit")]
-    qemu_exit(checked.is_ok());
+    qemu_exit(matches!(copied, Some(Ok(_))));
 
     halt()
 }
@@ -79,7 +98,7 @@ fn read_kernel(
 }
 
 /// Tells QEMU to quit, so the boot test can finish: with exit code 33 if the
-/// kernel file was read and checked, 35 if not.
+/// kernel file was read, checked and copied, 35 if not.
 #[cfg(feature = "qemu-exit")]
 fn qemu_exit(success: bool) {
     /// Port of QEMU's `isa-debug-exit` device, as configured by `xtask`.

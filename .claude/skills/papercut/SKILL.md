@@ -8,7 +8,9 @@ description: Report something in the tooling, rules or documents that got in the
 A papercut is friction in how work is done, not a bug in Bismuth. Working
 around one quietly means the next session hits it too.
 
-1. **Check it is not already filed.** Search open issues labelled `papercut`.
+1. **Check it is not already filed.** List the open papercuts with
+   `cargo xtask issue-list --label papercut`, and read any whose title looks
+   close with `cargo xtask issue-read <number>`.
    *Check:* no existing issue describes the same thing.
 
 2. **File it:** `cargo xtask issue-new --title <text> --body-file <path>

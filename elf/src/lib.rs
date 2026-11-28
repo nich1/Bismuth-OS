@@ -31,6 +31,7 @@
 // `split_at`, `copy_from_slice`, `chunks`, `windows` or `pow`; the reader
 // uses none of them.
 
+pub mod place;
 #[cfg(test)]
 mod tests;
 
