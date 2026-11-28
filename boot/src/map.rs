@@ -32,6 +32,9 @@ const STACK: Permissions = Permissions {
     write: true,
     execute: false,
 };
+// The stack must be writable and must not run code; `check_stack` holds the
+// tables to the same rule on its own.
+const _: () = assert!(STACK.write && !STACK.execute);
 
 /// The top-level entry for the top 512 GiB, where the kernel goes.
 const KERNEL_ENTRY: usize = 511;
@@ -157,7 +160,12 @@ fn check_stack(frames: &mut Frames, stack: u64) -> Result<(), MapFailure> {
         let address = STACK_BOTTOM + page * PAGE_SIZE;
         let expected = stack + page * PAGE_SIZE;
         let found = paging::translate(frames, live, address);
-        if found != Some((expected, STACK)) {
+        // The rule, stated here rather than taken from `STACK`, so that a
+        // mistake in the mapping cannot also change what is expected: the
+        // page's own frame, writable, and not executable.
+        let good = matches!(found, Some((frame, Permissions { write: true, execute: false }))
+            if frame == expected);
+        if !good {
             return Err(MapFailure::StackWalk {
                 address,
                 found,

@@ -25,6 +25,10 @@ mod host;
 #[cfg(test)]
 #[path = "../../boot/src/report.rs"]
 mod boot_report;
+// The same for the kernel's checks of the state it was entered in.
+#[cfg(test)]
+#[path = "../../kernel/src/entry.rs"]
+mod kernel_entry;
 
 const USAGE: &str = "\
 usage: cargo xtask <task>

@@ -69,6 +69,19 @@ impl Com1 {
         }
     }
 
+    /// Sends `value` as `0x` and 16 hexadecimal digits.
+    pub fn write_hex(&self, value: u64) {
+        self.write_str("0x");
+        for shift in (0..16).rev() {
+            let digit = (value >> (shift * 4)) as u8 & 0xF;
+            self.write_byte(if digit < 10 {
+                b'0' + digit
+            } else {
+                b'a' + digit - 10
+            });
+        }
+    }
+
     /// Sends one byte, waiting briefly for the port to be ready.
     fn write_byte(&self, byte: u8) {
         wait_for(TRANSMIT_READY);

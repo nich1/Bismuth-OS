@@ -92,30 +92,47 @@ or tell the firmware to step aside. Those come next.
 
 ### How the kernel is entered
 
-The kernel's entry point is entered by a jump, never a call, in this
-state:
+The kernel's entry point is entered by a jump, never a call. Much of the
+state below is the firmware's, inherited unchanged: the UEFI
+specification (version 2.10), section 2.3.4 "x64 Platforms", says what
+the firmware sets up before it starts a program like the boot stage, and
+the boot stage changes only what is listed here as its own. The kernel
+relies on all of it, and must not rely on anything not listed.
 
-- **Address tables.** The tables the boot stage built (see "Address
-  tables" below). Each kernel segment is at its linked address with its
-  own permissions. The stack is 16 pages (64 KiB) at
-  `0xFFFF_FFFF_7FFF_0000` up to `0xFFFF_FFFF_8000_0000`, read and write,
-  not executable, cleared; the page below it, at `0xFFFF_FFFF_7FFE_F000`,
-  is not mapped, so running off the stack faults instead of overwriting
-  other memory. The firmware's mappings are all still there in the lower
-  half, this program's among them, but the kernel must not rely on them:
-  they go once the kernel has its own tables.
+- **Privilege and mode:** the most privileged level (ring 0), in 64-bit
+  long mode, with the firmware's segment descriptor table and its code,
+  stack and data segments still loaded. The boot stage changes none of
+  them.
+- **Paging:** on, with 4-level tables (`CR4.LA57` is off; the boot stage
+  checks), `CR4.PAE` on as long mode requires, and `CR3` pointing at the
+  tables the boot stage built (see "Address tables" below). Each kernel
+  segment is at its linked address with its own permissions. The stack
+  is 16 pages (64 KiB) at `0xFFFF_FFFF_7FFF_0000` up to
+  `0xFFFF_FFFF_8000_0000`, writable, not executable, cleared; the page
+  below it, at `0xFFFF_FFFF_7FFE_F000`, is not mapped, so running off the
+  stack faults instead of overwriting other memory. The firmware's
+  mappings are all still there in the lower half, the boot stage's
+  among them, but the kernel must not rely on them: they go once the
+  kernel has its own tables.
+- **`IA32_EFER.NXE`:** on. The tables mark pages that may not run code
+  with a bit that is reserved, and faults, while it is off. The boot
+  stage turns it on if the firmware has not.
+- **`CR0.WP`:** as the firmware left it, which the `PLACED` line reports.
+  When it is clear, the kernel can write its own read-only pages.
+- **Interrupts:** off (`RFLAGS.IF` clear). But the firmware's interrupt
+  table is still loaded, so a non-maskable interrupt, a machine check or
+  a fault in the kernel runs the firmware's handler, on the kernel's
+  stack. That handler is in the lower half, which is still mapped.
+- **Direction flag:** clear (`RFLAGS.DF`). The other bits of `RFLAGS` are
+  undefined.
 - **Stack pointer:** `0xFFFF_FFFF_7FFF_FFF8`, eight below the top. On entry
   to a function, System V x86-64 code expects the stack pointer plus 8 to
   be a multiple of 16, as it is just after a `call` has pushed a return
-  address. The kernel's entry is an ordinary `extern "sysv64"` function,
-  so it is given exactly that, and needs no stub of its own to set up the
-  stack. The eight bytes at the stack pointer, where a return address
-  would be, are zero; the entry function never returns.
-- **Flags:** interrupts are off (`IF` clear) and the direction flag is
-  clear. Nothing turns interrupts back on.
-- **Other registers:** undefined. Only the stack pointer, the instruction
-  pointer and the two flags above are given values. Nothing is passed to
-  the kernel yet.
+  address. The eight bytes at the stack pointer are zero.
+- **The general-purpose registers are undefined.** Nothing is passed to
+  the kernel yet. The other control registers, and the floating-point and
+  vector state, are as the firmware left them; the kernel is built not to
+  use the floating-point and vector registers.
 - **The firmware:** boot services are still running, because nothing has
   told the firmware to step aside yet, but the kernel must not call them,
   and the boot stage does not after the jump.
@@ -125,13 +142,29 @@ state:
   sending the boot stage's last bytes, then sets it up again the same way
   itself.
 
+**What the kernel checks.** Its entry point is a short stub of a few
+instructions (`kernel/src/cpu.rs`) that records the stack pointer and
+`RFLAGS` before anything changes them, then clears the direction flag,
+aligns the stack and calls the kernel proper. That checks, in
+`kernel/src/entry.rs`, that interrupts were off, that the direction flag
+was clear, and that the stack pointer was 8 below a multiple of 16 and
+in the top half of the address range. If not, it prints `BISMUTH KERNEL
+ENTRY ERROR:` and what is wrong (for example `interrupts are on`, or
+`stack pointer not 8 below a multiple of 16: 0xffffffff80000000`) and
+stops, with the kernel's failure code under `qemu-exit`. The rest of the
+list it does not check: a broken mapping or a missing `NXE` makes it
+fault instead, and the boot stage's own checks come first.
+
 The stack cannot meet a kernel segment: its top is the lowest address a
 segment may start at, the placement rules refuse a segment below it or
 one that runs past the top of the address range, and
 `elf/src/place.rs` fails to build if the stack's constants are moved
 above it. The stack and its guard page lie in the 2 MiB below the
 kernel's 2 GiB, which no segment shares, so they need one directory and
-one last-level table of their own.
+one last-level table of their own. Before the jump the boot stage looks
+up every page of the stack in the tables in use and requires its own
+frame, writable and not executable, and requires the guard page to be
+missing.
 
 ### Address tables
 
@@ -381,6 +414,10 @@ The jump to the kernel in `boot/src/cpu.rs` uses `CLI`, `CLD`, `LEA` and
 `JMP` (Intel volume 2A, each instruction's entry), and the state it leaves
 the stack and flags in is what the System V AMD64 psABI, section 3.2
 "Function Calling Sequence", asks of a function's entry. The kernel's
+entry stub in `kernel/src/cpu.rs` uses `MOV`, `PUSHFQ`, `POP`, `CLD`,
+`AND`, `CALL` and `UD2` (Intel volumes 2A and 2B), and the flags it
+checks in `kernel/src/entry.rs` are those of Intel volume 1, section
+"EFLAGS Register". The kernel's
 port access in `kernel/src/port.rs` uses `IN` and `OUT` (Intel volumes 2A
 and 2B), and its serial port in `kernel/src/serial.rs` follows the
 registers of the 16550 UART (the PC16550D data sheet).

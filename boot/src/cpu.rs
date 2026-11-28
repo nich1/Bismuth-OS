@@ -143,9 +143,12 @@ pub unsafe fn set_efer(value: u64) {
 /// The instructions are `CLI`, `CLD`, `LEA` and `JMP` (SDM volume 2A,
 /// "CLI—Clear Interrupt Flag", "CLD—Clear Direction Flag", "LEA—Load
 /// Effective Address" and "JMP—Jump"). `CLI` is allowed in ring 0 whatever the I/O
-/// privilege level. Every other register keeps whatever value it had; only
-/// the stack pointer, the instruction pointer and the flags' interrupt and
-/// direction bits are defined at the kernel's entry.
+/// privilege level. Only the stack pointer, the instruction pointer and the
+/// flags' interrupt and direction bits change; the general-purpose
+/// registers keep whatever values they had, which the kernel may not rely
+/// on, and everything else (privilege level, mode, segments, control
+/// registers, the firmware's interrupt table) stays as it is, as the entry
+/// contract in `docs/boot.md` lists.
 ///
 /// # Safety
 ///

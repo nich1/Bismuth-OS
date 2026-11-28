@@ -20,6 +20,7 @@ unsafe blocks in frames/src/tests.rs: 0
 unsafe blocks in handoff/src/lib.rs: 0
 unsafe blocks in handoff/src/tests.rs: 0
 unsafe blocks in kernel/src/cpu.rs: 1
+unsafe blocks in kernel/src/entry.rs: 0
 unsafe blocks in kernel/src/main.rs: 0
 unsafe blocks in kernel/src/port.rs: 3
 unsafe blocks in kernel/src/serial.rs: 3
@@ -45,6 +46,7 @@ unsafe fn declarations in frames/src/tests.rs: 0
 unsafe fn declarations in handoff/src/lib.rs: 0
 unsafe fn declarations in handoff/src/tests.rs: 0
 unsafe fn declarations in kernel/src/cpu.rs: 0
+unsafe fn declarations in kernel/src/entry.rs: 0
 unsafe fn declarations in kernel/src/main.rs: 0
 unsafe fn declarations in kernel/src/port.rs: 2
 unsafe fn declarations in kernel/src/serial.rs: 0
