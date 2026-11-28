@@ -51,6 +51,13 @@ name = "bismuth-paging"
 version = "0.0.0"
 
 [[package]]
+name = "bismuth-pci"
+version = "0.0.0"
+dependencies = [
+ "bismuth-acpi",
+]
+
+[[package]]
 name = "xtask"
 version = "0.0.0"
 dependencies = [

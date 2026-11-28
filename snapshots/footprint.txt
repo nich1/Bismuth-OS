@@ -35,6 +35,8 @@ unsafe blocks in kernel/src/port.rs: 3
 unsafe blocks in kernel/src/serial.rs: 3
 unsafe blocks in paging/src/lib.rs: 0
 unsafe blocks in paging/src/tests.rs: 0
+unsafe blocks in pci/src/lib.rs: 0
+unsafe blocks in pci/src/tests.rs: 0
 unsafe fn declarations in acpi/src/lib.rs: 0
 unsafe fn declarations in acpi/src/tests.rs: 0
 unsafe fn declarations in apic/src/lib.rs: 0
@@ -70,3 +72,5 @@ unsafe fn declarations in kernel/src/port.rs: 2
 unsafe fn declarations in kernel/src/serial.rs: 0
 unsafe fn declarations in paging/src/lib.rs: 0
 unsafe fn declarations in paging/src/tests.rs: 0
+unsafe fn declarations in pci/src/lib.rs: 0
+unsafe fn declarations in pci/src/tests.rs: 0

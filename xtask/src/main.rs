@@ -1152,6 +1152,8 @@ fn check() -> Result<()> {
             "lints (paging)",
             lints("bismuth-paging", &["--all-targets"]),
         ),
+        cargo_step("unit tests (pci)", vec!["test", "--package", "bismuth-pci"]),
+        cargo_step("lints (pci)", lints("bismuth-pci", &["--all-targets"])),
         cargo_step(
             "lints (kernel)",
             lints(KERNEL_PACKAGE, &["--target", KERNEL_TARGET]),
