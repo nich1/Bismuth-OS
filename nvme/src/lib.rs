@@ -10,9 +10,11 @@
 //! stay inside them. Nothing allocates or can panic.
 //!
 //! Everything comes from the NVM Express Base Specification, revision 1.4,
-//! in the sections named at each item; the Read and Write commands and the
-//! namespace data from its "NVM Command Set" chapter, which the NVM Command
-//! Set Specification 1.0 carries on with the same layouts. Only physical
+//! in the sections named at each item; the Read and Write commands from its
+//! "NVM Command Set" chapter and the namespace data from the Identify
+//! command in its "Admin Command Set" chapter. Later revisions move these
+//! to the NVM Command Set Specification and allow more than the 16 block
+//! formats read here. Only physical
 //! region page (PRP) data pointers are built: no scatter-gather lists.
 
 #![cfg_attr(not(test), no_std)]
@@ -832,7 +834,9 @@ pub enum Admin {
         /// `None` for a polled queue.
         interrupt: Option<u16>,
     },
-    /// Create I/O Submission Queue (01h), at the default priority.
+    /// Create I/O Submission Queue (01h). The queue priority field is left
+    /// at 00b, which the specification calls urgent; it only matters if the
+    /// controller is configured for weighted round robin arbitration.
     CreateSubmissionQueue {
         /// The queue's id.
         id: IoQueueId,
