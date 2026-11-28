@@ -7,6 +7,7 @@
 
 use bismuth_elf::Error as ElfError;
 use bismuth_elf::place::{Error as PlaceError, KERNEL_BASE, MAX_SEGMENTS, PAGE_LIMIT};
+use bismuth_paging::{Error as PagingError, Permissions};
 
 /// A step of reading the kernel file that goes through the firmware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,66 @@ pub enum PlaceFailure {
     NoPages {
         /// The segment's number.
         segment: usize,
+    },
+    /// The segment's contents do not lie inside the file, or would not fit
+    /// in its pages where they start.
+    Contents {
+        /// The segment's number.
+        segment: usize,
+    },
+}
+
+/// Why the kernel could not be given its addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapFailure {
+    /// The processor uses 5-level paging, which the table builder does not
+    /// support.
+    FiveLevel,
+    /// The firmware already uses the top-level entry the kernel goes under.
+    TopEntryUsed,
+    /// The firmware refused frames for the tables, with this status, or
+    /// has no page allocation service.
+    NoFrames {
+        /// The firmware's error status, if it returned one.
+        status: Option<usize>,
+    },
+    /// The frames the firmware gave are not 4 KiB-aligned or reach past
+    /// 2^52.
+    FramesUnusable,
+    /// The table builder refused to map this segment.
+    Map {
+        /// The segment's number, in file order among those with memory.
+        segment: usize,
+        /// The segment's kernel address.
+        address: u64,
+        /// What the builder returned.
+        error: PagingError,
+    },
+    /// Walking the tables in use found a page of a segment not mapped, or
+    /// mapped to another frame or with other permissions than it should be.
+    Walk {
+        /// The segment's number.
+        segment: usize,
+        /// The page's kernel address.
+        address: u64,
+        /// The frame and permissions found, if the page is mapped.
+        found: Option<(u64, Permissions)>,
+        /// The frame and permissions it should have.
+        expected: (u64, Permissions),
+    },
+    /// A segment's pages cannot be read as one block at their kernel
+    /// address, because they end at the top of the address range.
+    ReadBack {
+        /// The segment's number.
+        segment: usize,
+    },
+    /// The pages read through their kernel addresses sum differently from
+    /// the pages as copied.
+    Sum {
+        /// The sum of the pages as copied.
+        copied: u64,
+        /// The sum read through the kernel addresses.
+        read: u64,
     },
 }
 
@@ -209,6 +270,119 @@ pub fn copied_line(segments: usize, pages: u64, sum: u64) -> Line {
     line
 }
 
+/// `BISMUTH KERNEL PLACED segments=<n> pages=<n> sum=0x<hex>
+/// perms=<list> wp=<0|1>`: `perms` gives each segment's permissions, in
+/// file order, as `r`, then `w` or `-`, then `x` or `-`.
+pub fn placed_line(
+    pages: u64,
+    sum: u64,
+    permissions: impl ExactSizeIterator<Item = Permissions>,
+    write_protect: bool,
+) -> Line {
+    let mut line = Line::new("BISMUTH KERNEL PLACED segments=");
+    line.push_decimal(permissions.len() as u64)
+        .push(" pages=")
+        .push_decimal(pages)
+        .push(" sum=")
+        .push_hex(sum)
+        .push(" perms=");
+    for (at, permissions) in permissions.enumerate() {
+        line.push(if at == 0 { "" } else { "," })
+            .push(permissions_text(permissions));
+    }
+    line.push(if write_protect { " wp=1" } else { " wp=0" });
+    line
+}
+
+/// `BISMUTH KERNEL MAP ERROR: <short reason>`.
+pub fn map_error_line(failure: &MapFailure) -> Line {
+    let mut line = Line::new("BISMUTH KERNEL MAP ERROR: ");
+    match *failure {
+        MapFailure::FiveLevel => {
+            line.push("5-level paging is on");
+        }
+        MapFailure::TopEntryUsed => {
+            line.push("top-level entry 511 is already used");
+        }
+        MapFailure::NoFrames { status } => {
+            line.push("no frames for the tables: ");
+            match status {
+                Some(status) => line.push("status ").push_hex(status as u64),
+                None => line.push("no interface"),
+            };
+        }
+        MapFailure::FramesUnusable => {
+            line.push("the frames for the tables are unaligned or above 2^52");
+        }
+        MapFailure::Map {
+            segment,
+            address,
+            error,
+        } => {
+            line.push("could not map segment ")
+                .push_decimal(segment as u64)
+                .push(" at ")
+                .push_hex(address)
+                .push(": ");
+            match error {
+                PagingError::Unaligned => line.push("Unaligned"),
+                PagingError::Empty => line.push("Empty"),
+                PagingError::NonCanonical => line.push("NonCanonical"),
+                PagingError::PhysicalTooLarge => line.push("PhysicalTooLarge"),
+                PagingError::AlreadyMapped(at) => line.push("AlreadyMapped at ").push_hex(at),
+                PagingError::LargePage(at) => line.push("LargePage at ").push_hex(at),
+                PagingError::OutOfFrames => line.push("OutOfFrames"),
+            };
+        }
+        MapFailure::Walk {
+            segment,
+            address,
+            found,
+            expected,
+        } => {
+            line.push("segment ")
+                .push_decimal(segment as u64)
+                .push(" page ")
+                .push_hex(address)
+                .push(" is ");
+            match found {
+                Some((frame, permissions)) => line
+                    .push("at ")
+                    .push_hex(frame)
+                    .push(" ")
+                    .push(permissions_text(permissions)),
+                None => line.push("not mapped"),
+            };
+            line.push(", expected ")
+                .push_hex(expected.0)
+                .push(" ")
+                .push(permissions_text(expected.1));
+        }
+        MapFailure::ReadBack { segment } => {
+            line.push("segment ")
+                .push_decimal(segment as u64)
+                .push(" ends at the top of the address range and cannot be read back");
+        }
+        MapFailure::Sum { copied, read } => {
+            line.push("sum read at the kernel addresses ")
+                .push_hex(read)
+                .push(" differs from the copied sum ")
+                .push_hex(copied);
+        }
+    }
+    line
+}
+
+/// `r--`, `rw-`, `r-x` or `rwx`: reading is always allowed.
+fn permissions_text(permissions: Permissions) -> &'static str {
+    match (permissions.write, permissions.execute) {
+        (false, false) => "r--",
+        (true, false) => "rw-",
+        (false, true) => "r-x",
+        (true, true) => "rwx",
+    }
+}
+
 /// `BISMUTH KERNEL PLACE ERROR: <short reason>`.
 pub fn place_error_line(failure: &PlaceFailure) -> Line {
     let mut line = Line::new("BISMUTH KERNEL PLACE ERROR: ");
@@ -228,6 +402,9 @@ pub fn place_error_line(failure: &PlaceFailure) -> Line {
             line.push("no pages for segment ")
                 .push_decimal(segment as u64)
                 .push(": no interface");
+        }
+        PlaceFailure::Contents { segment: s } => {
+            segment(&mut line, s, " lies outside the file or its pages");
         }
         PlaceFailure::Rule(PlaceError::NotExecutable) => {
             line.push("not a fixed-address executable");
@@ -268,6 +445,9 @@ pub fn place_error_line(failure: &PlaceFailure) -> Line {
             line.push_decimal(pages)
                 .push(" pages, more than the limit of ")
                 .push_decimal(PAGE_LIMIT);
+        }
+        PlaceFailure::Rule(PlaceError::EntryNotExecutable) => {
+            line.push("entry point not in an executable segment");
         }
     }
     line
@@ -451,6 +631,10 @@ mod tests {
                 PlaceError::TooManyPages { pages: 16385 },
                 "16385 pages, more than the limit of 16384",
             ),
+            (
+                PlaceError::EntryNotExecutable,
+                "entry point not in an executable segment",
+            ),
         ];
         for (error, reason) in cases {
             let line = place_error_line(&PlaceFailure::Rule(error));
@@ -469,6 +653,154 @@ mod tests {
             place_error_line(&none).as_str(),
             format!("{prefix}no pages for segment 0: no interface")
         );
+        let contents = PlaceFailure::Contents { segment: 2 };
+        assert_eq!(
+            place_error_line(&contents).as_str(),
+            format!("{prefix}segment 2 lies outside the file or its pages")
+        );
+    }
+
+    const READ: Permissions = Permissions {
+        write: false,
+        execute: false,
+    };
+    const READ_EXECUTE: Permissions = Permissions {
+        write: false,
+        execute: true,
+    };
+
+    #[test]
+    fn the_placed_line_has_the_documented_shape() {
+        let all = [
+            READ,
+            READ_EXECUTE,
+            Permissions {
+                write: true,
+                execute: false,
+            },
+            Permissions {
+                write: true,
+                execute: true,
+            },
+        ];
+        assert_eq!(
+            placed_line(5, 0xcbf2_9ce4_8422_2325, all.into_iter(), true).as_str(),
+            "BISMUTH KERNEL PLACED segments=4 pages=5 sum=0xcbf29ce484222325 \
+             perms=r--,r-x,rw-,rwx wp=1"
+        );
+        assert_eq!(
+            placed_line(1, 0x1, [READ].into_iter(), false).as_str(),
+            "BISMUTH KERNEL PLACED segments=1 pages=1 sum=0x1 perms=r-- wp=0"
+        );
+        // The longest: eight segments and the most pages.
+        let longest = placed_line(PAGE_LIMIT, u64::MAX, [READ; MAX_SEGMENTS].into_iter(), true);
+        assert!(
+            longest.as_str().ends_with("r--,r-- wp=1"),
+            "{}",
+            longest.as_str()
+        );
+        assert!(longest.as_str().len() < Line::CAPACITY);
+    }
+
+    #[test]
+    fn each_map_failure_has_its_own_reason() {
+        let prefix = "BISMUTH KERNEL MAP ERROR: ";
+        let base = KERNEL_BASE;
+        let cases = [
+            (MapFailure::FiveLevel, "5-level paging is on"),
+            (
+                MapFailure::TopEntryUsed,
+                "top-level entry 511 is already used",
+            ),
+            (
+                MapFailure::NoFrames {
+                    status: Some(0x8000_0000_0000_0009),
+                },
+                "no frames for the tables: status 0x8000000000000009",
+            ),
+            (
+                MapFailure::NoFrames { status: None },
+                "no frames for the tables: no interface",
+            ),
+            (
+                MapFailure::FramesUnusable,
+                "the frames for the tables are unaligned or above 2^52",
+            ),
+            (
+                MapFailure::Map {
+                    segment: 1,
+                    address: base + 0x1000,
+                    error: PagingError::AlreadyMapped(base + 0x2000),
+                },
+                "could not map segment 1 at 0xffffffff80001000: \
+                 AlreadyMapped at 0xffffffff80002000",
+            ),
+            (
+                MapFailure::Map {
+                    segment: 0,
+                    address: base,
+                    error: PagingError::OutOfFrames,
+                },
+                "could not map segment 0 at 0xffffffff80000000: OutOfFrames",
+            ),
+            (
+                MapFailure::Walk {
+                    segment: 1,
+                    address: base + 0x3000,
+                    found: None,
+                    expected: (0x7000, READ_EXECUTE),
+                },
+                "segment 1 page 0xffffffff80003000 is not mapped, expected 0x7000 r-x",
+            ),
+            (
+                MapFailure::Walk {
+                    segment: 0,
+                    address: base,
+                    found: Some((0x6000, READ_EXECUTE)),
+                    expected: (0x5000, READ),
+                },
+                "segment 0 page 0xffffffff80000000 is at 0x6000 r-x, expected 0x5000 r--",
+            ),
+            (
+                MapFailure::ReadBack { segment: 3 },
+                "segment 3 ends at the top of the address range and cannot be read back",
+            ),
+            (
+                MapFailure::Sum {
+                    copied: 0x12,
+                    read: 0x34,
+                },
+                "sum read at the kernel addresses 0x34 differs from the copied sum 0x12",
+            ),
+        ];
+        for (failure, reason) in cases {
+            assert_eq!(
+                map_error_line(&failure).as_str(),
+                format!("{prefix}{reason}")
+            );
+        }
+        // Every builder error has a name of its own.
+        let mut names: Vec<_> = [
+            PagingError::Unaligned,
+            PagingError::Empty,
+            PagingError::NonCanonical,
+            PagingError::PhysicalTooLarge,
+            PagingError::AlreadyMapped(0),
+            PagingError::LargePage(0),
+            PagingError::OutOfFrames,
+        ]
+        .map(|error| {
+            let failure = MapFailure::Map {
+                segment: 0,
+                address: 0,
+                error,
+            };
+            map_error_line(&failure).as_str().to_string()
+        })
+        .to_vec();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 7);
     }
 
     #[test]

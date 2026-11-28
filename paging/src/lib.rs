@@ -46,9 +46,10 @@ pub trait PhysicalMemory {
     /// [`map`] zeroes every frame it is given before using it as a table.
     fn allocate_frame(&mut self) -> Option<u64>;
 
-    /// The 512 entries of the table at physical address `address`. The
-    /// library only asks for the top-level table it was given and for frames
-    /// it received from [`PhysicalMemory::allocate_frame`].
+    /// The 512 entries of the table at physical address `address`. [`map`]
+    /// only asks for the top-level table it was given and for frames it
+    /// received from [`PhysicalMemory::allocate_frame`]; [`translate`] also
+    /// asks for any table an entry on its way points to, and only reads.
     fn table(&mut self, address: u64) -> &mut [u64; 512];
 }
 
@@ -158,6 +159,55 @@ pub fn map(
         *leaf = flags | physical_start.wrapping_add(offset);
     }
     Ok(())
+}
+
+/// Looks up virtual address `address` under the top-level table at physical
+/// address `root` the way the processor does, and returns the physical
+/// address it reaches and what the page allows, or `None` if it is not
+/// mapped: an entry on the way is not present, the address is not
+/// canonical, or a top-level entry has its page-size bit set (reserved
+/// there).
+///
+/// Unlike [`map`] it follows large pages. The levels combine as in SDM
+/// vol. 3A ch. 4, section "Access Rights": a page may be written only if
+/// every entry on the way allows writes, and run only if none has the
+/// execute-disable bit set. Only the present, read/write, page-size,
+/// execute-disable and address bits are read; user-mode and caching bits,
+/// and the accessed and dirty bits the processor sets, are ignored.
+pub fn translate(
+    memory: &mut impl PhysicalMemory,
+    root: u64,
+    address: u64,
+) -> Option<(u64, Permissions)> {
+    half(address)?;
+    let mut permissions = Permissions {
+        write: true,
+        execute: true,
+    };
+    let mut table = root;
+    // Each level's shift, and the bits of the address inside the page an
+    // entry at that level maps if it is a leaf: none at the top, 1 GiB,
+    // 2 MiB, 4 KiB.
+    for (shift, in_page) in [(39, 0), (30, 0x3FFF_FFFF), (21, 0x1F_FFFF), (12, 0xFFF)] {
+        let current = *entry(memory.table(table), address, shift);
+        if current & PRESENT == 0 {
+            return None;
+        }
+        permissions.write &= current & WRITABLE != 0;
+        permissions.execute &= current & NO_EXECUTE == 0;
+        // In a page entry, bit 7 is a caching bit, not the page size.
+        if shift == 12 || current & PAGE_SIZE_BIT != 0 {
+            if in_page == 0 {
+                return None;
+            }
+            return Some((
+                (current & ADDRESS & !in_page) | (address & in_page),
+                permissions,
+            ));
+        }
+        table = current & ADDRESS;
+    }
+    None
 }
 
 // SDM vol. 3A ch. 4, "4-Level Paging and 5-Level Paging": the entry-format

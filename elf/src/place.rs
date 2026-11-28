@@ -73,6 +73,9 @@ pub enum Error {
         /// How many they take.
         pages: u64,
     },
+    /// The entry point is not inside the memory of a segment that may be
+    /// run, so starting the kernel would fault.
+    EntryNotExecutable,
 }
 
 /// Where one segment goes: the pages it takes at its linked address, and
@@ -141,7 +144,8 @@ impl Placement {
 }
 
 /// Checks that `elf` can be placed as linked and says where each segment
-/// goes.
+/// goes. That the entry point lies in a segment that may be run is checked
+/// last, once every segment's layout has passed.
 pub fn place(elf: &Elf) -> Result<Placement, Error> {
     place_segments(elf.file_type(), elf.entry(), elf.segments())
 }
@@ -163,7 +167,9 @@ pub fn place_segments(
         placed: [Placed::EMPTY; MAX_SEGMENTS],
         count: 0,
     };
+    let mut entered = false;
     for (segment, s) in segments.into_iter().enumerate() {
+        entered |= s.flags.execute && s.contains(entry);
         if s.address < KERNEL_BASE {
             return Err(Error::BelowBase { segment });
         }
@@ -211,6 +217,9 @@ pub fn place_segments(
     let pages = placement.pages();
     if pages > PAGE_LIMIT {
         return Err(Error::TooManyPages { pages });
+    }
+    if !entered {
+        return Err(Error::EntryNotExecutable);
     }
     Ok(placement)
 }

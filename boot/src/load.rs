@@ -8,11 +8,7 @@ use bismuth_elf::{Elf, Flags};
 use crate::report::PlaceFailure;
 use crate::uefi::BootServices;
 
-/// One segment copied into memory: what the address tables will map.
-#[expect(
-    dead_code,
-    reason = "the address tables, built next (issue 27), read the addresses and flags"
-)]
+/// One segment copied into memory: what the address tables map.
 pub struct Loaded {
     /// The physical address of its first page.
     pub physical: u64,
@@ -46,7 +42,7 @@ impl Kernel {
         // The placement holds at most `MAX_SEGMENTS`, so none is left out.
         for (slot, placed) in kernel.loaded.iter_mut().zip(placement.segments()) {
             let (physical, memory) = boot_services.allocate_pages(placed.pages, placed.segment)?;
-            fill(memory, bytes, placed);
+            fill(memory, bytes, placed)?;
             *slot = Some(Loaded {
                 physical,
                 address: placed.page,
@@ -83,13 +79,24 @@ impl Kernel {
 /// page. The rest of `memory` is already zero.
 ///
 /// The ELF reader keeps the contents inside the file, and the placement
-/// rules keep them inside the pages (`file_size` is at most `memory_size`),
-/// so the ranges are in bounds.
-fn fill(memory: &mut [u8], bytes: &[u8], placed: &Placed) {
-    let (offset, size, start) = (
-        placed.offset as usize,
-        placed.file_size as usize,
-        placed.start as usize,
-    );
-    memory[start..start + size].copy_from_slice(&bytes[offset..offset + size]);
+/// rules keep them inside the pages, but both ranges are checked here too,
+/// so this does not depend on code in another package.
+fn fill(memory: &mut [u8], bytes: &[u8], placed: &Placed) -> Result<(), PlaceFailure> {
+    let range = |start: u64| {
+        let start = usize::try_from(start).ok()?;
+        let size = usize::try_from(placed.file_size).ok()?;
+        Some(start..start.checked_add(size)?)
+    };
+    let from = range(placed.offset).and_then(|range| bytes.get(range));
+    let to = range(placed.start).and_then(|range| memory.get_mut(range));
+    match (to, from) {
+        // Both are `file_size` bytes long.
+        (Some(to), Some(from)) => {
+            to.copy_from_slice(from);
+            Ok(())
+        }
+        _ => Err(PlaceFailure::Contents {
+            segment: placed.segment,
+        }),
+    }
 }

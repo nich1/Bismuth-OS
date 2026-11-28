@@ -12,3 +12,4 @@ workspace = true
 [dependencies]
 # Part of this repository, not a third-party package.
 bismuth-elf = { path = "../elf" }
+bismuth-paging = { path = "../paging" }
