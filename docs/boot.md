@@ -46,7 +46,8 @@ The boot stage then does five things:
    same place in the first page as its address. It records, per segment,
    where its pages are, the kernel address they belong at, how many there
    are and their permissions. Then it reads the pages back and writes
-   `BISMUTH KERNEL COPIED segments=2 pages=2 sum=0x108120a9f6b1b5b1`: the
+   `BISMUTH KERNEL COPIED segments=2 pages=2 sum=0x108120a9f6b1b5b1` (the
+   numbers are an example, and the sum changes from build to build): the
    sum is a 64-bit FNV-1a checksum of every byte of those pages. A broken
    rule, or the firmware refusing pages, gets a line starting `BISMUTH
    KERNEL PLACE ERROR:` instead.
