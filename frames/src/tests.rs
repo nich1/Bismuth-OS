@@ -484,8 +484,11 @@ fn a_run_of_allocations_is_linear_overall() {
     assert_eq!(tracker.examined, before);
 }
 
+/// Freeing at or below the search position moves it to the freed frame, so
+/// the next allocation examines one word. Frees here fall in address, so
+/// each is below the position the one before left.
 #[test]
-fn a_freed_frame_is_found_without_a_search() {
+fn a_frame_freed_at_or_below_the_search_position_is_found_in_one_word() {
     let mut words = bitmap(6400);
     let mut tracker = Tracker::new(&mut words, BASE, 6400).unwrap();
     tracker.add_usable(BASE, 6400).unwrap();
@@ -496,6 +499,31 @@ fn a_freed_frame_is_found_without_a_search() {
         assert_eq!(tracker.allocate(), Some(at(frame)));
         assert_eq!(tracker.examined - before, 1, "frame {frame}");
     }
+}
+
+/// Freeing above the search position leaves it where it is, even on a group
+/// with nothing free, so the next allocation walks up to the freed frame.
+/// This is the documented cost, not a goal: a change to it changes these
+/// numbers.
+#[test]
+fn a_frame_freed_above_the_search_position_is_found_by_walking_up() {
+    // Ten groups; only the first and the last are usable.
+    let mut words = bitmap(640);
+    let mut tracker = Tracker::new(&mut words, BASE, 640).unwrap();
+    tracker.add_usable(BASE, 64).unwrap();
+    tracker.add_usable(at(576), 64).unwrap();
+    for _ in 0..128 {
+        assert!(tracker.allocate().is_some());
+    }
+    tracker.free(at(0)).unwrap();
+    let before = tracker.examined;
+    assert_eq!(tracker.allocate(), Some(at(0)));
+    assert_eq!(tracker.examined - before, 1);
+    // The position stays on the first group, now empty.
+    tracker.free(at(600)).unwrap();
+    let before = tracker.examined;
+    assert_eq!(tracker.allocate(), Some(at(600)));
+    assert_eq!(tracker.examined - before, 10, "groups 0 to 9");
 }
 
 #[test]

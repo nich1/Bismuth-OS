@@ -36,16 +36,26 @@
 //!
 //! # Cost
 //!
-//! The tracker remembers the lowest group of 64 frames that can hold a free
-//! frame. Allocation searches upward from there and stays at the group it
-//! found a frame in; freeing a frame or adding a range below it moves it
-//! down. One allocation examines at most every group's free word once (the
-//! covered frames divided by 64, rounded up), when the only free frame is in
-//! the last group. A run of allocations with no frees or additions in
-//! between examines at most the number of groups plus one word per
-//! allocation in all, and an allocation right after a free examines one
-//! word. Freeing is constant time; adding and reserving go over the range
-//! twice, a frame at a time.
+//! The tracker remembers a search position: a group of 64 frames below which
+//! no group has a free frame. Allocation searches upward from it, one free
+//! word per group, and stays at the group it found a frame in, even when it
+//! took that group's last free frame. Freeing a frame or adding a range
+//! below the position moves it down to that group; freeing a frame above it
+//! leaves it where it is.
+//!
+//! - One allocation examines each group's free word at most once: at most
+//!   the covered frames divided by 64, rounded up.
+//! - A run of allocations with no frees or additions in between examines at
+//!   most the number of groups plus one word per allocation in all.
+//! - An allocation right after a free examines one word if the group at the
+//!   search position then has a free frame, which is always so when the
+//!   freed frame is in that group or below it. If the freed frame is above,
+//!   the search walks up from the position to the freed frame's group, which
+//!   can be the whole bitmap. So with memory nearly full, frees and
+//!   allocations in turn cost time in proportion to the bitmap's size per
+//!   allocation.
+//! - Freeing is constant time; adding and reserving go over the range
+//!   twice, a frame at a time.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
