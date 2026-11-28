@@ -4,9 +4,9 @@
 //! [`efi_main`]. It writes one line to the serial port and one to the
 //! firmware console, reads the kernel file from the disk it was loaded from
 //! and checks it with the ELF reader, copies its segments into memory, gives
-//! them their kernel addresses in new address tables, reports each step on
-//! the serial port, then stops. Starting the kernel comes later. See
-//! `docs/boot.md`.
+//! them their kernel addresses in new address tables along with a stack,
+//! reports each step on the serial port, then jumps to the kernel. On a
+//! failure it stops instead. See `docs/boot.md`.
 
 #![no_std]
 #![no_main]
@@ -24,6 +24,7 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 
 use bismuth_elf::Elf;
+use bismuth_elf::place::STACK_TOP;
 use report::{Failure, Step};
 
 /// The line the automated boot test looks for on the serial port.
@@ -109,8 +110,26 @@ pub unsafe extern "efiapi" fn efi_main(
         }
     }
 
+    if let (Some((_, Ok(_))), Ok((_, elf))) = (&placed, &checked) {
+        let entry = elf.entry();
+        serial.write_str(report::jump_line(entry, STACK_TOP).as_str());
+        serial.write_str("\n");
+        // SAFETY: `map::place` succeeded, so the tables in CR3 map every
+        // segment of the kernel at its address with its own permissions,
+        // and the placement rules put `entry` inside a segment that may be
+        // run; the walk found every page where it belongs. They also map
+        // the stack's pages below `STACK_TOP`, a 2 MiB boundary, read and
+        // write, cleared, with the guard page below them missing. The
+        // kernel's entry is an `extern "sysv64"` function that never
+        // returns (`kernel/src/main.rs`). Nothing of this program's runs
+        // after the jump: its memory, the tables and the copied pages are
+        // the kernel's from then on, and boot services, still running, are
+        // not called again.
+        unsafe { cpu::enter_kernel(entry, STACK_TOP) }
+    }
+
     #[cfg(feature = "qemu-exit")]
-    qemu_exit(matches!(placed, Some((_, Ok(_)))));
+    qemu_exit_failure();
 
     halt()
 }
@@ -126,20 +145,20 @@ fn read_kernel(
     Ok((bytes, elf))
 }
 
-/// Tells QEMU to quit, so the boot test can finish: with exit code 33 if the
-/// kernel file was read, checked, copied and given its addresses, 35 if
-/// not.
+/// Tells QEMU to quit with exit code 35, so the boot test can finish: the
+/// kernel could not be started. On success the kernel exits QEMU itself,
+/// with codes of its own. (33, for `0x10`, was the boot stage's success
+/// before it started the kernel, and is not used now.)
 #[cfg(feature = "qemu-exit")]
-fn qemu_exit(success: bool) {
+fn qemu_exit_failure() {
     /// Port of QEMU's `isa-debug-exit` device, as configured by `xtask`.
     const DEBUG_EXIT_PORT: u16 = 0xF4;
-    /// QEMU exits with `(value << 1) | 1`: 33 and 35.
-    const SUCCESS: u32 = 0x10;
+    /// QEMU exits with `(value << 1) | 1`: 35.
     const FAILURE: u32 = 0x11;
 
     // SAFETY: this function only exists in the `qemu-exit` build, which the
     // boot test runs inside QEMU with the debug-exit device at this port.
-    unsafe { port::write_u32(DEBUG_EXIT_PORT, if success { SUCCESS } else { FAILURE }) }
+    unsafe { port::write_u32(DEBUG_EXIT_PORT, FAILURE) }
 }
 
 /// Stops the processor for good, waking only to go back to sleep.

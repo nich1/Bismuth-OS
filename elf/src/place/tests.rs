@@ -329,3 +329,29 @@ fn the_checksum_is_64_bit_fnv_1a() {
     pieces.add(b"bar");
     assert_eq!(pieces.value(), sum(b"foobar"));
 }
+
+#[test]
+fn no_segment_can_reach_the_stack_or_its_guard_page() {
+    // A segment on the guard page, on the stack's lowest or highest page,
+    // or starting on the stack and running up into the kernel's range.
+    let code = segment(KERNEL_BASE, 0, 0x1000, true);
+    for (address, memory) in [
+        (STACK_GUARD, 0x1000),
+        (STACK_BOTTOM, 0x1000),
+        (STACK_TOP - 0x1000, 0x1000),
+        (STACK_TOP - 1, 2),
+        (STACK_GUARD, STACK_PAGES * PAGE_SIZE + 0x2000),
+    ] {
+        let low = segment(address, address & IN_PAGE, memory, false);
+        assert_eq!(
+            error(KERNEL_BASE, &[code, low]),
+            Error::BelowBase { segment: 1 },
+            "{address:#x}"
+        );
+    }
+    // The lowest segment allowed starts where the stack ends.
+    assert_eq!(STACK_TOP, KERNEL_BASE);
+    assert!(place_at(KERNEL_BASE, &[code]).is_ok());
+    assert_eq!(STACK_BOTTOM + STACK_PAGES * PAGE_SIZE, STACK_TOP);
+    assert_eq!(STACK_GUARD + PAGE_SIZE, STACK_BOTTOM);
+}

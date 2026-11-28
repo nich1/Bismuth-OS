@@ -1,26 +1,40 @@
 //! Gives the kernel its addresses: builds new address tables that keep
 //! everything the firmware mapped and add each copied segment at its kernel
-//! address with its own permissions, switches the processor to them while
-//! boot services still run, and proves the kernel is there by walking the
-//! tables in use and reading every byte back through the kernel addresses.
-//! Safe code over `cpu` and `memory`.
+//! address with its own permissions, and the kernel's stack below them,
+//! switches the processor to them while boot services still run, and
+//! proves the kernel is there by walking the tables in use and reading
+//! every byte back through the kernel addresses, and that the stack is
+//! there with its guard page missing. Safe code over `cpu` and `memory`.
 
 use bismuth_elf::Flags;
-use bismuth_elf::place::{Fnv1a, MAX_SEGMENTS, PAGE_LIMIT};
+use bismuth_elf::place::{Fnv1a, MAX_SEGMENTS, PAGE_LIMIT, STACK_BOTTOM, STACK_GUARD, STACK_PAGES};
 use bismuth_paging::{self as paging, PAGE_SIZE, Permissions, PhysicalMemory};
 
 use crate::cpu;
 use crate::load::Kernel;
 use crate::memory::{self, Frames};
-use crate::report::MapFailure;
+use crate::report::{MapFailure, PlaceFailure};
 use crate::uefi::BootServices;
 
 /// Frames enough for any kernel the placement rules accept, which lies in
-/// the top 2 GiB: the top-level table, one directory-pointer table, two
-/// directories (each covers 1 GiB), and a last-level table for each 2 MiB a
-/// segment touches. A segment of `p` pages touches at most `p / 512 + 2`
-/// of those, and the segments take at most `PAGE_LIMIT` pages together.
-const TABLE_FRAMES: u64 = 4 + PAGE_LIMIT / 512 + 2 * MAX_SEGMENTS as u64;
+/// the top 2 GiB, and its stack: the top-level table, one directory-pointer
+/// table, two directories for the kernel (each covers 1 GiB), and a
+/// last-level table for each 2 MiB a segment touches. A segment of `p`
+/// pages touches at most `p / 512 + 2` of those, and the segments take at
+/// most `PAGE_LIMIT` pages together. The stack and its guard page lie in
+/// the 2 MiB just below the kernel's 2 GiB, in the 1 GiB below them, so
+/// they take one directory and one last-level table more, shared with no
+/// segment. In all, 4 + 16384 / 512 + 2 * 8 + 2 = 54 frames.
+const TABLE_FRAMES: u64 = 4 + PAGE_LIMIT / 512 + 2 * MAX_SEGMENTS as u64 + 2;
+
+/// What the stack's pages allow: reading and writing, never running code.
+const STACK: Permissions = Permissions {
+    write: true,
+    execute: false,
+};
+// The stack must be writable and must not run code; `check_stack` holds the
+// tables to the same rule on its own.
+const _: () = assert!(STACK.write && !STACK.execute);
 
 /// The top-level entry for the top 512 GiB, where the kernel goes.
 const KERNEL_ENTRY: usize = 511;
@@ -48,7 +62,8 @@ impl Placed {
     }
 }
 
-/// Builds the tables for `kernel`, switches to them and checks the result.
+/// Builds the tables for `kernel` and its stack, switches to them and
+/// checks the result.
 pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, MapFailure> {
     if cpu::cr4() & cpu::CR4_LA57 != 0 {
         return Err(MapFailure::FiveLevel);
@@ -57,6 +72,15 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
         return Err(MapFailure::NoExecuteUnsupported);
     }
     let mut frames = Frames::new(boot_services, TABLE_FRAMES)?;
+    // Loader data, like the segments' pages, cleared and never freed.
+    let (stack, _) = boot_services
+        .allocate_pages(STACK_PAGES, 0)
+        .map_err(|failure| MapFailure::NoStack {
+            status: match failure {
+                PlaceFailure::Firmware { status, .. } => Some(status),
+                _ => None,
+            },
+        })?;
     let root = frames.root();
     let firmware = cpu::cr3();
     // SAFETY: `firmware` was just read from CR3, and boot services run.
@@ -96,6 +120,16 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
             error,
         })?;
     }
+    // At most 16 pages, below every segment; the guard page is left out.
+    paging::map(
+        &mut frames,
+        root,
+        STACK_BOTTOM,
+        stack,
+        STACK_PAGES * PAGE_SIZE,
+        STACK,
+    )
+    .map_err(|error| MapFailure::StackMap { error })?;
     // SAFETY: `root` is a 4 KiB-aligned frame below 2^52 (`Frames::new`).
     // It holds the firmware's 512 top-level entries, so everything mapped
     // before, this program and the firmware among it, translates as
@@ -108,9 +142,43 @@ pub fn place(boot_services: &BootServices, kernel: &Kernel) -> Result<Placed, Ma
     // top-level table. Relied on: such edits keep the firmware's own
     // mappings valid, as they must for the firmware's tables, and leave
     // entry 511, which the firmware did not use, alone. The walk below
-    // checks the kernel's mappings after any such edits.
+    // checks the kernel's and the stack's mappings after any such edits.
+    // The stack's pages are like the segments': loader data, never freed,
+    // mapped only under entry 511, and not used by anything yet.
     unsafe { cpu::set_cr3(firmware & !cpu::CR3_ADDRESS | root) }
-    check(&mut frames, kernel)
+    let placed = check(&mut frames, kernel)?;
+    check_stack(&mut frames, stack)?;
+    Ok(placed)
+}
+
+/// Walks the tables in use for every page of the stack, whose first page
+/// is at physical address `stack`: each must lead to its own frame, read
+/// and write, not executable. The guard page below it must not be mapped.
+fn check_stack(frames: &mut Frames, stack: u64) -> Result<(), MapFailure> {
+    let live = cpu::cr3() & cpu::CR3_ADDRESS;
+    for page in 0..STACK_PAGES {
+        let address = STACK_BOTTOM + page * PAGE_SIZE;
+        let expected = stack + page * PAGE_SIZE;
+        let found = paging::translate(frames, live, address);
+        // The rule, stated here rather than taken from `STACK`, so that a
+        // mistake in the mapping cannot also change what is expected: the
+        // page's own frame, writable, and not executable.
+        let good = matches!(found, Some((frame, Permissions { write: true, execute: false }))
+            if frame == expected);
+        if !good {
+            return Err(MapFailure::StackWalk {
+                address,
+                found,
+                expected,
+            });
+        }
+    }
+    match paging::translate(frames, live, STACK_GUARD) {
+        None => Ok(()),
+        Some(_) => Err(MapFailure::GuardMapped {
+            address: STACK_GUARD,
+        }),
+    }
 }
 
 /// Walks the tables in use for every page of every segment, then reads the

@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,10 @@ mod host;
 #[cfg(test)]
 #[path = "../../boot/src/report.rs"]
 mod boot_report;
+// The same for the kernel's checks of the state it was entered in.
+#[cfg(test)]
+#[path = "../../kernel/src/entry.rs"]
+mod kernel_entry;
 
 const USAGE: &str = "\
 usage: cargo xtask <task>
@@ -63,11 +68,23 @@ const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const KERNEL_PACKAGE: &str = "bismuth-kernel";
 /// The text the boot stage must print on the serial port.
 const BOOT_MARKER: &str = "BISMUTH BOOT OK";
-/// What QEMU exits with when the boot stage reports success: `(0x10 << 1) | 1`.
+/// What QEMU exited with when the boot stage reported success, before the
+/// kernel ran: `(0x10 << 1) | 1`. Nothing exits with it now, since the boot
+/// stage jumps to the kernel instead; the tests check no scenario expects it.
+#[cfg(test)]
 const QEMU_SUCCESS_EXIT: i32 = 33;
 /// What QEMU exits with when the boot stage reports that the kernel file is
 /// missing or wrong: `(0x11 << 1) | 1`.
 const QEMU_FAILURE_EXIT: i32 = 35;
+/// What QEMU exits with when the kernel has started and printed its line:
+/// `(0x20 << 1) | 1`.
+const KERNEL_SUCCESS_EXIT: i32 = 65;
+/// What QEMU exits with when the kernel panics: `(0x21 << 1) | 1`.
+const KERNEL_FAILURE_EXIT: i32 = 67;
+/// The line the kernel prints once it runs.
+const KERNEL_MARKER: &str = "BISMUTH KERNEL OK";
+/// The line the kernel's panic handler prints.
+const KERNEL_PANIC: &str = "BISMUTH KERNEL PANIC";
 /// How long one boot scenario may take before it is treated as a hang.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Where the boot scenarios' disks are laid out, one folder each.
@@ -158,8 +175,10 @@ fn run_checked(command: &mut Command, what: &str) -> Result<()> {
 ///
 /// UEFI firmware boots a disk by running `EFI/BOOT/BOOTX64.EFI` from it, so
 /// that is where the boot stage is copied. The kernel goes to
-/// `EFI/BISMUTH/KERNEL.ELF`. With `exit_when_done`, the boot stage is built
-/// to make QEMU quit once it has printed its message.
+/// `EFI/BISMUTH/KERNEL.ELF`. With `exit_when_done`, the boot stage and the
+/// kernel are both built with their `qemu-exit` features, to make
+/// QEMU quit with their own exit codes: the boot stage on a failure, the
+/// kernel once it runs.
 fn build(exit_when_done: bool) -> Result<()> {
     let mut command = cargo();
     command.args(["build", "--package", BOOT_PACKAGE, "--target", UEFI_TARGET]);
@@ -168,8 +187,7 @@ fn build(exit_when_done: bool) -> Result<()> {
     }
     run_checked(&mut command, "cargo build")?;
 
-    let root = root();
-    let built = root
+    let built = root()
         .join("target")
         .join(UEFI_TARGET)
         .join("debug")
@@ -177,22 +195,30 @@ fn build(exit_when_done: bool) -> Result<()> {
     let image = boot_image();
     copy_file(&built, &image)?;
 
-    run_checked(
-        cargo().args([
-            "build",
-            "--package",
-            KERNEL_PACKAGE,
-            "--target",
-            KERNEL_TARGET,
-        ]),
-        "cargo build (kernel)",
-    )?;
-    let built = root
+    let features: &[&str] = if exit_when_done { &["qemu-exit"] } else { &[] };
+    copy_file(&build_kernel(features)?, &kernel_image())
+}
+
+/// Builds the kernel with `features` and returns where the file is. Each
+/// build replaces the one before it at that place.
+fn build_kernel(features: &[&str]) -> Result<PathBuf> {
+    let mut command = cargo();
+    command.args([
+        "build",
+        "--package",
+        KERNEL_PACKAGE,
+        "--target",
+        KERNEL_TARGET,
+    ]);
+    if !features.is_empty() {
+        command.args(["--features", &features.join(",")]);
+    }
+    run_checked(&mut command, "cargo build (kernel)")?;
+    Ok(root()
         .join("target")
         .join(KERNEL_TARGET)
         .join("debug")
-        .join(KERNEL_PACKAGE);
-    copy_file(&built, &kernel_image())
+        .join(KERNEL_PACKAGE))
 }
 
 /// Copies `from` to `to`, creating the folder `to` goes in.
@@ -299,8 +325,8 @@ fn copied_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
 
 /// The line the boot stage prints after giving the kernel file `bytes` its
 /// addresses: the same segments, pages and sum as [`copied_line`], each
-/// segment's permissions from its flags, and any state of `CR0.WP`, which
-/// is the firmware's and is only reported.
+/// segment's permissions from its flags, and either state of `CR0.WP`,
+/// which is the firmware's and is only reported.
 fn placed_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
     let copied = copied_line(bytes, elf);
     let counts = copied
@@ -316,7 +342,7 @@ fn placed_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
         })
         .collect();
     format!(
-        "BISMUTH KERNEL PLACED {counts} perms={} wp={ANY}",
+        "BISMUTH KERNEL PLACED {counts} perms={} wp={BIT}",
         permissions.join(",")
     )
 }
@@ -327,8 +353,41 @@ fn placed_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
 /// service still works after the switch.
 const CONSOLE_AFTER_SWITCH: &str = "Bismuth kernel addresses checked.";
 
-/// At the end of an expected line, stands for any text.
-const ANY: &str = "*";
+/// At the end of an expected line, stands for exactly `0` or `1`.
+const BIT: &str = "?";
+
+/// The line the boot stage prints on the serial port just before it jumps
+/// to the kernel file `elf`'s entry point on the kernel's stack.
+fn jump_line(elf: &bismuth_elf::Elf) -> String {
+    format!(
+        "BISMUTH KERNEL JUMP entry={:#x} stack={:#x}",
+        elf.entry(),
+        place::STACK_TOP
+    )
+}
+
+/// A boot of the kernel file `kernel` that gets as far as the jump: the
+/// `FILE OK`, `COPIED`, `PLACED` and console lines, then the `JUMP` line,
+/// then `last` from the kernel, and QEMU exiting with `exit_code`.
+fn started(name: &'static str, kernel: &[u8], last: &str, exit_code: i32) -> Result<Scenario> {
+    let elf = bismuth_elf::Elf::parse(kernel)
+        .map_err(|error| format!("the ELF reader rejected the {name} kernel: {error:?}"))?;
+    let ok = format!(
+        "BISMUTH KERNEL FILE OK entry={:#x} segments={} bytes={}",
+        elf.entry(),
+        elf.segments().count(),
+        kernel.len()
+    );
+    let mut scenario = Scenario::new(name, Some(kernel), ok, exit_code);
+    scenario.lines.extend([
+        copied_line(kernel, &elf),
+        placed_line(kernel, &elf),
+        CONSOLE_AFTER_SWITCH.to_string(),
+        jump_line(&elf),
+        last.to_string(),
+    ]);
+    Ok(scenario)
+}
 
 /// The offsets in `kernel` of its loadable segments' program headers. gABI
 /// ch. 4, "ELF Header": `e_phoff` is the eight bytes at 32 and `e_phnum` the
@@ -493,10 +552,7 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
     let truncated = kernel
         .get(..cut)
         .ok_or("the kernel is too short to truncate")?;
-    let mut normal = Scenario::new("normal", Some(kernel), ok.clone(), QEMU_SUCCESS_EXIT);
-    normal.lines.push(copied_line(kernel, &elf));
-    normal.lines.push(placed_line(kernel, &elf));
-    normal.lines.push(CONSOLE_AFTER_SWITCH.to_string());
+    let normal = started("normal", kernel, KERNEL_MARKER, KERNEL_SUCCESS_EXIT)?;
 
     // gABI ch. 4, "ELF Header": `e_entry` is the eight bytes at 24; ch. 5,
     // "Program Header": `p_vaddr` is at 16 and `p_memsz` at 40 in a header.
@@ -540,12 +596,7 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
         last + 40,
         get_u64(kernel, last + 40) + 2 * place::PAGE_SIZE,
     );
-    let long_elf = bismuth_elf::Elf::parse(&long)
-        .map_err(|error| format!("the ELF reader rejected the long kernel: {error:?}"))?;
-    let mut long_segment =
-        Scenario::new("long-segment", Some(&long), ok.clone(), QEMU_SUCCESS_EXIT);
-    long_segment.lines.push(copied_line(&long, &long_elf));
-    long_segment.lines.push(placed_line(&long, &long_elf));
+    let long_segment = started("long-segment", &long, KERNEL_MARKER, KERNEL_SUCCESS_EXIT)?;
     // The last segment moved onto the last page of the address range, at
     // the same place in the page.
     let mut top_page = kernel.to_vec();
@@ -615,17 +666,32 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
     ])
 }
 
+/// The kernel built with its `panic-at-entry` feature, `panicking`: started
+/// like the normal kernel, it prints the panic line and QEMU exits with the
+/// kernel's failure code.
+fn panic_scenario(panicking: &[u8]) -> Result<Scenario> {
+    let mut scenario = started("kernel-panic", panicking, KERNEL_PANIC, KERNEL_FAILURE_EXIT)?;
+    scenario.absent.push(KERNEL_MARKER.to_string());
+    Ok(scenario)
+}
+
 /// The processor model for the scenario without no-execute pages.
 const NO_EXECUTE_CPU: &str = "qemu64,-nx";
 
-/// Builds the boot stage with `qemu-exit`, runs every boot scenario and
-/// fails if any did not behave as expected.
+/// Builds the boot stage and the kernel with `qemu-exit`, runs every boot
+/// scenario and fails if any did not behave as expected. The last scenario
+/// boots a second kernel file, built to panic as soon as it starts.
 fn test() -> Result<()> {
     build(true)?;
     let kernel = fs::read(kernel_image())
         .map_err(|error| format!("could not read the kernel file: {error}"))?;
+    let panicking = build_kernel(&["qemu-exit", "panic-at-entry"])?;
+    let panicking = fs::read(&panicking)
+        .map_err(|error| format!("could not read the panicking kernel file: {error}"))?;
+    let mut all = scenarios(&kernel)?;
+    all.push(panic_scenario(&panicking)?);
     let mut failed = Vec::new();
-    for scenario in scenarios(&kernel)? {
+    for scenario in all {
         let started = Instant::now();
         let disk = scenario_disk(&scenario)?;
         let (status, serial) = boot(&disk, scenario.cpu)?;
@@ -676,10 +742,24 @@ fn scenario_disk(scenario: &Scenario) -> Result<String> {
     Ok(disk)
 }
 
+/// What the firmware in QEMU (OVMF) prints on the serial port when the
+/// processor raises an exception it handles, such as a page fault in the
+/// kernel, before it stops the processor for good.
+const FIRMWARE_EXCEPTION: &str = "!!!! X64 Exception Type";
+
 /// Says why a boot that ended with exit code `status` (`None` for a hang)
 /// and printed `serial` does not meet `scenario`, or `None` if it does.
 fn boot_failure(scenario: &Scenario, status: Option<i32>, serial: &str) -> Option<String> {
     let Some(code) = status else {
+        if let Some(line) = serial
+            .lines()
+            .find(|line| line.contains(FIRMWARE_EXCEPTION))
+        {
+            return Some(format!(
+                "the firmware reported a processor exception and QEMU was stopped: {}",
+                line.trim()
+            ));
+        }
         return Some(format!(
             "QEMU did not exit within {} seconds",
             BOOT_TIMEOUT.as_secs()
@@ -693,8 +773,10 @@ fn boot_failure(scenario: &Scenario, status: Option<i32>, serial: &str) -> Optio
     }
     let mut printed = serial.lines().map(|line| line.trim_end_matches('\r'));
     for line in &scenario.lines {
-        let matches = |printed: &str| match line.strip_suffix(ANY) {
-            Some(start) => printed.starts_with(start),
+        let matches = |printed: &str| match line.strip_suffix(BIT) {
+            Some(start) => printed
+                .strip_prefix(start)
+                .is_some_and(|rest| rest == "0" || rest == "1"),
             None => printed == line,
         };
         if !printed.any(matches) {
@@ -725,19 +807,35 @@ fn boot(disk: &str, cpu: Option<&str>) -> Result<(Option<i32>, String)> {
         .spawn()
         .map_err(|error| format!("could not start QEMU: {error}"))?;
     let mut stdout = child.stdout.take().expect("stdout was piped");
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        // A read error only shortens the captured output; the checks below
-        // still decide the result.
-        let _ = stdout.read_to_end(&mut bytes);
-        bytes
-    });
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let captured = Arc::clone(&captured);
+        thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            // A read error only shortens the captured output; the checks
+            // below still decide the result.
+            while let Ok(read @ 1..) = stdout.read(&mut chunk) {
+                if let Ok(mut bytes) = captured.lock() {
+                    bytes.extend_from_slice(&chunk[..read]);
+                }
+            }
+        })
+    };
+    let faulted = || {
+        captured.lock().is_ok_and(|bytes| {
+            bytes
+                .windows(FIRMWARE_EXCEPTION.len())
+                .any(|window| window == FIRMWARE_EXCEPTION.as_bytes())
+        })
+    };
 
     let deadline = Instant::now() + BOOT_TIMEOUT;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
-            Ok(None) if Instant::now() >= deadline => {
+            // The firmware's handler stops the processor for good after
+            // its report, so waiting longer would only reach the limit.
+            Ok(None) if Instant::now() >= deadline || faulted() => {
                 // Killing can only fail if QEMU has just exited by itself.
                 let _ = child.kill();
                 let _ = child.wait();
@@ -747,8 +845,12 @@ fn boot(disk: &str, cpu: Option<&str>) -> Result<(Option<i32>, String)> {
             Err(error) => return Err(format!("could not wait for QEMU: {error}")),
         }
     };
-    let serial = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
-    Ok((status, serial))
+    let _ = reader.join();
+    let bytes = captured
+        .lock()
+        .map(|bytes| bytes.clone())
+        .unwrap_or_default();
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// How a step of `check` that did not pass ended.
@@ -885,6 +987,13 @@ fn check() -> Result<()> {
         cargo_step(
             "lints (kernel)",
             lints(KERNEL_PACKAGE, &["--target", KERNEL_TARGET]),
+        ),
+        cargo_step(
+            "lints (kernel, qemu-exit)",
+            lints(
+                KERNEL_PACKAGE,
+                &["--target", KERNEL_TARGET, "--features", "qemu-exit"],
+            ),
         ),
         cargo_step(
             "lints (boot)",
@@ -1130,8 +1239,9 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Result, Scenario, Step, Stop, boot_failure, describe_kernel, locate_qemu, page_images,
-        paths_in_markdown, placed_line, run_steps, scenarios,
+        KERNEL_SUCCESS_EXIT, QEMU_SUCCESS_EXIT, Result, Scenario, Step, Stop, boot_failure,
+        describe_kernel, locate_qemu, page_images, panic_scenario, paths_in_markdown, placed_line,
+        run_steps, scenarios,
     };
     use bismuth_elf::place::{Error as PlaceError, KERNEL_BASE, PAGE_LIMIT};
     use std::cell::RefCell;
@@ -1154,6 +1264,13 @@ mod tests {
         let serial = "BISMUTH BOOT OK\nBISMUTH KERNEL FILE ERROR: file not found\n";
         let failure = |status, serial| boot_failure(&missing(), status, serial).expect("fails");
         assert!(failure(None, serial).contains("did not exit"));
+        let fault = "BISMUTH BOOT OK\r\n!!!! X64 Exception Type - 0E(#PF - Page-Fault)  CPU \
+                     Apic ID - 00000000 !!!!\r\nRIP  - FFFFFFFF80000000\r\n";
+        assert_eq!(
+            failure(None, fault),
+            "the firmware reported a processor exception and QEMU was stopped: \
+             !!!! X64 Exception Type - 0E(#PF - Page-Fault)  CPU Apic ID - 00000000 !!!!"
+        );
         assert!(failure(Some(33), serial).contains("code 33, expected 35"));
         assert!(failure(Some(35), "BISMUTH BOOT OK\n").contains("did not contain"));
         // Out of order, or only part of a line.
@@ -1175,11 +1292,16 @@ mod tests {
     }
 
     #[test]
-    fn an_expected_line_ending_in_a_star_matches_any_ending() {
-        let scenario = Scenario::new("star", None, "LINE a=1 b=*".to_string(), 33);
+    fn an_expected_line_ending_in_a_question_mark_matches_only_0_or_1() {
+        let scenario = Scenario::new("bit", None, "LINE a=1 b=?".to_string(), 33);
         for (serial, passes) in [
             ("BISMUTH BOOT OK\nLINE a=1 b=0\n", true),
-            ("BISMUTH BOOT OK\nLINE a=1 b=\n", true),
+            ("BISMUTH BOOT OK\nLINE a=1 b=1\r\n", true),
+            ("BISMUTH BOOT OK\nLINE a=1 b=\n", false),
+            ("BISMUTH BOOT OK\nLINE a=1 b=2\n", false),
+            ("BISMUTH BOOT OK\nLINE a=1 b=10\n", false),
+            ("BISMUTH BOOT OK\nLINE a=1 b=1 more\n", false),
+            ("BISMUTH BOOT OK\nLINE a=1 b=?\n", false),
             ("BISMUTH BOOT OK\nLINE a=2 b=0\n", false),
             ("BISMUTH BOOT OK\nLINE a=1\n", false),
         ] {
@@ -1217,7 +1339,7 @@ mod tests {
             all[0].lines[1],
             "BISMUTH KERNEL FILE OK entry=0xffffffff80001040 segments=2 bytes=8192"
         );
-        assert_eq!(all[0].exit_code, 33);
+        assert_eq!(all[0].exit_code, KERNEL_SUCCESS_EXIT);
         assert_eq!(all[1].kernel, None);
         assert_eq!(all[2].kernel.as_deref(), Some(&[][..]));
         for (scenario, error) in [
@@ -1399,12 +1521,12 @@ mod tests {
             .expect("copied");
         assert_eq!(
             normal.lines[3],
-            format!("BISMUTH KERNEL PLACED {copied} perms=r--,r-x wp=*")
+            format!("BISMUTH KERNEL PLACED {copied} perms=r--,r-x wp=?")
         );
         assert_eq!(normal.lines[4], "Bismuth kernel addresses checked.");
         // The code grown from one page to three, the two new ones zero.
         let long = &all[8];
-        assert_eq!(long.exit_code, 33);
+        assert_eq!(long.exit_code, KERNEL_SUCCESS_EXIT);
         let file = long.kernel.as_deref().expect("has a file");
         // The pages hold the patched file, then zeros.
         let mut sum = bismuth_elf::place::Fnv1a::new();
@@ -1421,6 +1543,27 @@ mod tests {
         assert_eq!(long.lines[3], placed_line(file, &elf));
         assert!(long.lines[3].contains(" pages=4 "), "{}", long.lines[3]);
         assert_eq!(&long.lines[1], &normal.lines[1]);
+    }
+
+    #[test]
+    fn the_started_scenarios_expect_the_jump_then_the_kernels_line() {
+        let kernel = two_segment_kernel();
+        let all = scenarios(&kernel).expect("scenarios");
+        let jump = "BISMUTH KERNEL JUMP entry=0xffffffff80001040 stack=0xffffffff80000000";
+        for scenario in [&all[0], &all[8]] {
+            assert_eq!(scenario.lines.len(), 7, "{}", scenario.name);
+            assert_eq!(scenario.lines[5], jump);
+            assert_eq!(scenario.lines[6], "BISMUTH KERNEL OK");
+            assert_eq!(scenario.exit_code, 65);
+        }
+        // The kernel exits now, so nothing expects the boot stage's success.
+        assert!(all.iter().all(|s| s.exit_code != QEMU_SUCCESS_EXIT));
+        let panic = panic_scenario(&kernel).expect("scenario");
+        assert_eq!(panic.name, "kernel-panic");
+        assert_eq!(panic.lines[..6], all[0].lines[..6]);
+        assert_eq!(panic.lines[6], "BISMUTH KERNEL PANIC");
+        assert_eq!(panic.absent, ["BISMUTH KERNEL OK"]);
+        assert_eq!(panic.exit_code, 67);
     }
 
     #[test]
