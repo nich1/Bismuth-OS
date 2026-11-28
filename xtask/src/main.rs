@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use bismuth_elf::place;
 
+#[cfg(test)]
+mod command_tables;
 mod footprint;
 mod host;
 
@@ -34,10 +36,13 @@ tasks:
   snapshot [--update]
           build, then print the footprint report; --update also stores it
           in snapshots/footprint.txt
-  check   everything the pull request check runs: format, lint, unit tests,
-          footprint snapshot, kernel file check, boot scenarios
+  check   what the CI workflow runs on a pull request: feature map check,
+          format, lint, unit tests, footprint snapshot, kernel file check,
+          boot scenarios (not the text checks)
 
 code host tasks (need gh, GitHub's command-line tool):
+  issue-list [--label <name>]
+          print the number and title of each open issue, one per line
   issue-read <number>
   issue-comment <number> --body-file <path>
   issue-new --title <text> --body-file <path> [--label <name>]
@@ -80,6 +85,8 @@ fn main() -> ExitCode {
         ["snapshot"] => snapshot(false),
         ["snapshot", "--update"] => snapshot(true),
         ["check"] => check(),
+        ["issue-list"] => host::issue_list(None),
+        ["issue-list", "--label", label] => host::issue_list(Some(label)),
         ["issue-read", n] if is_number(n) => host::issue_read(n),
         ["issue-comment", n, "--body-file", body] if is_number(n) => host::issue_comment(n, body),
         ["issue-new", "--title", title, "--body-file", body] => host::issue_new(title, body, None),
