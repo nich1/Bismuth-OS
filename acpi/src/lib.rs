@@ -145,10 +145,12 @@ impl Rsdp {
         }
     }
 
-    /// The table of tables to read. The XSDT when there is one. Otherwise
-    /// (revision 0, or revision 2 or later with a zero XSDT address, where
-    /// the specification's guidance is to use the RSDT) the RSDT, whose
-    /// address [`Rsdp::read`] has checked is not zero.
+    /// The table of tables to read. The XSDT when there is one: the
+    /// specification says to use it if present, and this reader takes a
+    /// zero address to mean it is absent. Otherwise (revision 0, or
+    /// revision 2 or later with a zero XSDT address) the RSDT. For a value
+    /// that came from [`Rsdp::read`] that address is not zero; one built by
+    /// hand may return `Root::Rsdt(0)`.
     pub fn root(&self) -> Root {
         match self.xsdt_address {
             0 => Root::Rsdt(self.rsdt_address),
