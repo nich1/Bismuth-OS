@@ -24,6 +24,7 @@ const SOURCES: &[&str] = &[
     "handoff/src",
     "kernel/src",
     "paging/src",
+    "pci/src",
 ];
 
 /// How many `unsafe` items one Rust source file contains.
@@ -591,6 +592,7 @@ mod tests {
         tree.write("handoff/src/lib.rs", "unsafe fn i() {}");
         tree.write("kernel/src/main.rs", "unsafe fn e() { unsafe { f() } }");
         tree.write("paging/src/lib.rs", "fn g() { unsafe { h() } }");
+        tree.write("pci/src/lib.rs", "unsafe fn p() { unsafe { q() } }");
         tree.write(
             "Cargo.lock",
             "[[package]]\nname = \"outside\"\nsource = \"registry+https://example.com\"\n",
@@ -645,6 +647,10 @@ mod tests {
                     "paging/src/lib.rs".to_owned(),
                     UnsafeCounts { blocks: 1, fns: 0 }
                 ),
+                (
+                    "pci/src/lib.rs".to_owned(),
+                    UnsafeCounts { blocks: 1, fns: 1 }
+                ),
             ]
         );
     }
@@ -690,6 +696,7 @@ mod tests {
         tree.write("handoff/src/lib.rs", "fn e() {}");
         tree.write("kernel/src/main.rs", "fn c() {}");
         tree.write("paging/src/lib.rs", "fn d() {}");
+        tree.write("pci/src/lib.rs", "fn g() {}");
         let image = tree.0.join("image.efi");
 
         let error = measure(&tree.0, &image).err().expect("no image");
@@ -767,6 +774,7 @@ mod tests {
         tree.write("handoff/src/lib.rs", "");
         tree.write("kernel/src/main.rs", "");
         tree.write("paging/src/lib.rs", "");
+        tree.write("pci/src/lib.rs", "");
         fs::write(tree.0.join("boot/src/main.rs"), [0xFF]).expect("file is written");
         let error = measure(&tree.0, &tree.0.join("image.efi"))
             .err()
