@@ -2,7 +2,8 @@
 
 ## Problem and result
 
-<!-- The concrete problem, and what is true after this change. -->
+<!-- The concrete problem, and what is true after this change. Add a line
+     `Closes #N` for each issue this pull request finishes. -->
 
 ## Evidence
 
