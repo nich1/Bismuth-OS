@@ -15,6 +15,8 @@ unsafe blocks in elf/src/lib.rs: 0
 unsafe blocks in elf/src/place.rs: 0
 unsafe blocks in elf/src/place/tests.rs: 0
 unsafe blocks in elf/src/tests.rs: 0
+unsafe blocks in frames/src/lib.rs: 0
+unsafe blocks in frames/src/tests.rs: 0
 unsafe blocks in handoff/src/lib.rs: 0
 unsafe blocks in handoff/src/tests.rs: 0
 unsafe blocks in kernel/src/cpu.rs: 1
@@ -36,6 +38,8 @@ unsafe fn declarations in elf/src/lib.rs: 0
 unsafe fn declarations in elf/src/place.rs: 0
 unsafe fn declarations in elf/src/place/tests.rs: 0
 unsafe fn declarations in elf/src/tests.rs: 0
+unsafe fn declarations in frames/src/lib.rs: 0
+unsafe fn declarations in frames/src/tests.rs: 0
 unsafe fn declarations in handoff/src/lib.rs: 0
 unsafe fn declarations in handoff/src/tests.rs: 0
 unsafe fn declarations in kernel/src/cpu.rs: 0

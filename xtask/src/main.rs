@@ -859,6 +859,14 @@ fn check() -> Result<()> {
         cargo_step("unit tests (elf)", vec!["test", "--package", "bismuth-elf"]),
         cargo_step("lints (elf)", lints("bismuth-elf", &["--all-targets"])),
         cargo_step(
+            "unit tests (frames)",
+            vec!["test", "--package", "bismuth-frames"],
+        ),
+        cargo_step(
+            "lints (frames)",
+            lints("bismuth-frames", &["--all-targets"]),
+        ),
+        cargo_step(
             "unit tests (handoff)",
             vec!["test", "--package", "bismuth-handoff"],
         ),
