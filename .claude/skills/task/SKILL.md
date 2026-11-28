@@ -23,24 +23,31 @@ one holds.
    *Check:* the plan needs no architecture decision. If it does, stop and
    bring the owner a short explainer with options and a recommendation.
 
-4. **Branch.** From the latest `main`, named `type/short-description`.
+4. **Branch.** From the latest base branch (`main` unless the task is stacked
+   on an open pull request), named `type/short-description`.
    *Check:* `git status` shows the new branch and a clean tree.
 
 5. **Implement.** Hand the task to the `implementer` agent with the task
-   statement, the "done when" line and the files.
+   statement, the "done when" line and the files. If the change adds, moves
+   or removes something, the implementer updates `docs/map.md` in it.
    *Check:* its report shows the test failing before and passing after, and
-   what it broke on purpose that a test noticed.
+   what it broke on purpose that a test noticed. Every command the change
+   adds or alters that reaches an outside service, such as the code host,
+   has been run for real once, not only against a stand-in: a stand-in once
+   hid a permission failure that showed only in real use, after verification
+   had finished.
 
 6. **Commit, then verify.** Commit the work on the branch as the `open-pr`
    skill's first two steps say; pushing can wait. Hand the `verifier` agent
-   the task statement, the "done when" line and the range `main...HEAD` only,
-   never the working tree. Only *wrong behaviour* goes back to the
+   the task statement, the "done when" line and the range `<base>...HEAD`
+   only, where `<base>` is the base branch from step 4, never the working tree. Only *wrong behaviour* goes back to the
    implementer; commit its fix and verify once more. Never more than two passes.
    *Check:* no wrong behaviour is left, and every other finding is noted for
    the pull request's "Not verified, and remaining limitations" section.
 
-7. **Document.** If something was added or moved, hand the `explainer` agent
-   the change.
+7. **Document.** If something was added, moved or removed, hand the
+   `explainer` agent the change. It updates the explainers in `docs/` and
+   checks the map's rows for accuracy and plain wording.
    *Check:* `cargo xtask check` passes, which includes the feature map.
 
 8. **Open the pull request.** Use the `open-pr` skill.

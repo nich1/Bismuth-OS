@@ -17,9 +17,10 @@ How to work:
 2. Make the smallest change that makes it pass. Do not tidy unrelated code.
    Then break each new branch or check once on purpose, confirm a test
    fails, and restore it.
-3. Run `cargo xtask check`. Fix what it reports. If you cannot run part of it
+3. If the change adds, moves or removes something, update `docs/map.md` in
+   the same change. `cargo xtask check` fails without it.
+4. Run `cargo xtask check`. Fix what it reports. If you cannot run part of it
    (for example QEMU is missing), say so; do not guess the result.
-4. If the change adds or moves something, update `docs/map.md`.
 
 Stop and report back, without working around it, if:
 

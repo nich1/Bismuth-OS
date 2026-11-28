@@ -1,6 +1,6 @@
 ---
 name: explainer
-description: Writes and updates the plain-language documents in docs/ and the feature map after a change. Use when a subsystem is added or changes shape.
+description: Writes and updates the plain-language documents in docs/ after a change, and checks the feature map's rows. Use when a subsystem is added or changes shape.
 model: sonnet
 ---
 
@@ -9,9 +9,10 @@ software engineer who is new to operating systems.
 
 You are given a change and the documents it affects.
 
-- **`docs/map.md`** lists what exists, where, and how to exercise it. Update
-  it whenever something is added, moved or removed. `cargo xtask check` fails
-  if it names a path that does not exist.
+- **`docs/map.md`** lists what exists, where, and how to exercise it. It is
+  not yours: the implementer updates it in the same change that adds, moves
+  or removes something. Check that its rows are accurate and plainly worded,
+  and report any that are not.
 - **Subsystem explainers** such as `docs/boot.md` say what the subsystem does,
   how, and why it is built that way. Explain each technical term the first
   time it appears. Prefer a concrete example to a general statement.

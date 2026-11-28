@@ -27,8 +27,9 @@ not written down gets redone or guessed.
 ## Picking up
 
 1. **Read the issue and its latest resume note.**
-2. **Look at the branch and any open pull request.** `git log main..branch`,
-   the diff, the checks.
+2. **Look at the branch and any open pull request.** `git log <base>..branch`,
+   where `<base>` is the base branch (`main` unless the task is stacked on an
+   open pull request), the diff, the checks.
    *Check:* you can say what is done and what is next without rerunning
    finished work.
 3. **Confirm the starting point.** Run `cargo xtask check` on the branch.
@@ -41,4 +42,4 @@ not written down gets redone or guessed.
 |---|---|
 | No resume note, but a branch exists | Reconstruct from the commits and the diff, then write the note you wish you had found |
 | The note and the code disagree | The code is the truth. Correct the note |
-| The branch is far behind `main` | Bring it up to date before continuing. Never force-push |
+| The branch is far behind its base branch | Bring it up to date before continuing. Never force-push |

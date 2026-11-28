@@ -10,9 +10,9 @@ most of the typing is not done by a person.
 |---|---|
 | Owner | Sets the order of work, makes architecture decisions, approves by merging |
 | Orchestrator | Plans a task, splits it, checks the evidence, opens the pull request |
-| Implementer | Makes one scoped change, test first |
+| Implementer | Makes one scoped change, test first, and updates the feature map in it |
 | Verifier | Sees only the change and the task, and tries to break it |
-| Explainer | Keeps the documents and the feature map current |
+| Explainer | Keeps the documents current, and checks the feature map's rows |
 | Runner | Mechanical jobs: running checks, searching, summarising logs |
 
 The implementer and verifier use the most capable model. The explainer and
@@ -30,6 +30,8 @@ definitions are in `.claude/agents/`.
    argument.
 4. **Implement.** On a branch named for the task. The failing test comes
    first, and the implementer breaks its own code once to see a test notice.
+   If the change adds, moves or removes something, the implementer updates
+   the feature map in the same change.
 5. **Verify.** `cargo xtask check` passes and the work is committed, then the
    verifier attacks the commits, in its own copy, without seeing the
    implementer's reasoning. At most two passes: only wrong behaviour goes
@@ -38,8 +40,10 @@ definitions are in `.claude/agents/`.
    evidence and what is left.
 7. **Checks.** Tests, authorship and naming all run automatically.
 8. **Owner.** Merging is the approval. A comment sends the work back.
-9. **After merge.** The feature map is updated. Any correction the owner made
-   climbs the trust ladder.
+9. **After merge.** The issue closes with the merge, and the orchestrator
+   confirms the checks pass on `main`. Findings the verifier classed as
+   untested or unguarded are recorded on the next task's issue. Any
+   correction the owner made climbs the trust ladder.
 
 The procedures behind these steps are skills in `.claude/skills/`.
 
