@@ -34,14 +34,21 @@ pub struct UnsafeCounts {
     pub blocks: usize,
     /// `unsafe fn name` and `unsafe extern "abi" fn name` declarations.
     pub fns: usize,
+    /// `#[unsafe(...)]` attributes, such as `#[unsafe(no_mangle)]`.
+    pub attributes: usize,
+    /// `unsafe extern { ... }` and `unsafe extern "abi" { ... }` blocks.
+    pub extern_blocks: usize,
+    /// `unsafe impl` items.
+    pub impls: usize,
 }
 
-/// Counts the `unsafe` blocks and `unsafe fn` declarations in Rust source.
+/// Counts each kind of `unsafe` in Rust source.
 ///
 /// `unsafe { ... }` is a block. `unsafe fn name` and
 /// `unsafe extern "abi" fn name` are declarations. A function pointer type
-/// such as `unsafe extern "efiapi" fn(...)` is neither, and `unsafe impl`,
-/// `unsafe extern` blocks and `#[unsafe(...)]` attributes are not counted.
+/// such as `unsafe extern "efiapi" fn(...)` is neither. `unsafe(` is an
+/// attribute, `unsafe extern {` and `unsafe extern "abi" {` are extern
+/// blocks, and `unsafe impl` is an impl. `unsafe trait` is not counted.
 /// Comments and literals are skipped. Fails on an unterminated comment or
 /// literal, which would otherwise hide the rest of the file.
 pub fn count_unsafe(source: &str) -> Result<UnsafeCounts> {
@@ -60,6 +67,15 @@ pub fn count_unsafe(source: &str) -> Result<UnsafeCounts> {
             {
                 counts.fns += 1
             }
+            // Outside macro input, `unsafe (` is only ever an attribute, at
+            // the top of one or inside `cfg_attr`.
+            [Token::Punct('('), ..] => counts.attributes += 1,
+            [extern_, Token::Literal, Token::Punct('{'), ..] | [extern_, Token::Punct('{'), ..]
+                if is_word(extern_, "extern") =>
+            {
+                counts.extern_blocks += 1
+            }
+            [impl_, ..] if is_word(impl_, "impl") => counts.impls += 1,
             _ => {}
         }
     }
@@ -288,6 +304,10 @@ pub fn difference(expected: &str, actual: &str) -> Option<String> {
 pub struct Footprint {
     /// Size of the built boot image file.
     pub boot_image_bytes: u64,
+    /// Size of the kernel file the boot stage reads.
+    pub kernel_file_bytes: u64,
+    /// The pages the kernel's loadable segments take once placed.
+    pub kernel_pages: u64,
     /// `unsafe` counts per source file, by forward-slash path.
     pub unsafe_by_file: Vec<(String, UnsafeCounts)>,
     /// Packages in `Cargo.lock` that come from outside the repository.
@@ -298,19 +318,30 @@ pub struct Footprint {
 pub fn report(footprint: &Footprint) -> String {
     let mut lines = vec![
         format!("boot image bytes: {}", footprint.boot_image_bytes),
+        format!("kernel file bytes: {}", footprint.kernel_file_bytes),
+        format!("kernel loaded pages: {}", footprint.kernel_pages),
         format!("third-party packages: {}", footprint.third_party_packages),
     ];
     for (path, counts) in &footprint.unsafe_by_file {
         lines.push(format!("unsafe blocks in {path}: {}", counts.blocks));
         lines.push(format!("unsafe fn declarations in {path}: {}", counts.fns));
+        lines.push(format!(
+            "unsafe attributes in {path}: {}",
+            counts.attributes
+        ));
+        lines.push(format!(
+            "unsafe extern blocks in {path}: {}",
+            counts.extern_blocks
+        ));
+        lines.push(format!("unsafe impls in {path}: {}", counts.impls));
     }
     lines.sort();
     lines.iter().map(|line| format!("{line}\n")).collect()
 }
 
-/// Measures the footprint of the repository at `root`, whose boot image has
-/// already been built at `boot_image`.
-pub fn measure(root: &Path, boot_image: &Path) -> Result<Footprint> {
+/// Measures the footprint of the repository at `root`, whose boot image and
+/// kernel file have already been built at `boot_image` and `kernel`.
+pub fn measure(root: &Path, boot_image: &Path, kernel: &Path) -> Result<Footprint> {
     let boot_image_bytes = fs::metadata(boot_image)
         .map_err(|error| format!("could not read {}: {error}", boot_image.display()))?
         .len();
@@ -330,8 +361,17 @@ pub fn measure(root: &Path, boot_image: &Path) -> Result<Footprint> {
 
     let lock = fs::read_to_string(root.join("Cargo.lock"))
         .map_err(|error| format!("could not read Cargo.lock: {error}"))?;
+
+    let kernel = fs::read(kernel)
+        .map_err(|error| format!("could not read {}: {error}", kernel.display()))?;
+    let elf = bismuth_elf::Elf::parse(&kernel)
+        .map_err(|error| format!("the ELF reader rejected the kernel: {error:?}"))?;
+    let placement = bismuth_elf::place::place(&elf)
+        .map_err(|error| format!("the kernel cannot be placed as linked: {error:?}"))?;
     Ok(Footprint {
         boot_image_bytes,
+        kernel_file_bytes: kernel.len() as u64,
+        kernel_pages: placement.pages(),
         unsafe_by_file,
         third_party_packages: third_party_packages(&lock),
     })
@@ -369,6 +409,7 @@ fn entry_path(prefix: &str, name: &OsStr) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bismuth_elf::place::KERNEL_BASE;
 
     fn counts(source: &str) -> (usize, usize) {
         let counts = count_unsafe(source).expect("source scans");
@@ -423,11 +464,83 @@ mod tests {
     }
 
     #[test]
-    fn ignores_impls_extern_blocks_and_attributes() {
+    fn impls_extern_blocks_and_attributes_are_not_blocks_or_declarations() {
         let source = "unsafe impl Send for S {}\n\
                       unsafe extern \"C\" { fn f(); }\n\
                       #[unsafe(no_mangle)]\nfn g() {}";
         assert_eq!(counts(source), (0, 0));
+        assert_eq!(other_kinds(source), (1, 1, 1));
+    }
+
+    /// The `#[unsafe(...)]` attributes, `unsafe extern` blocks and
+    /// `unsafe impl`s in `source`.
+    fn other_kinds(source: &str) -> (usize, usize, usize) {
+        let counts = count_unsafe(source).expect("source scans");
+        (counts.attributes, counts.extern_blocks, counts.impls)
+    }
+
+    #[test]
+    fn counts_unsafe_attributes() {
+        let source = "#[unsafe(no_mangle)]\n#[unsafe(naked)]\nfn a() {}\n\
+                      #![unsafe(no_builtins)]\n\
+                      #[cfg_attr(test, unsafe(export_name = \"b\"))]\nfn b() {}";
+        assert_eq!(other_kinds(source), (4, 0, 0));
+    }
+
+    #[test]
+    fn an_attribute_in_a_comment_or_a_string_is_not_counted() {
+        let source = r####"
+            // #[unsafe(no_mangle)]
+            /// #[unsafe(no_mangle)]
+            /* #[unsafe(naked)] /* #[unsafe(naked)] */ */
+            let a = "#[unsafe(no_mangle)]";
+            let b = r#"#[unsafe(no_mangle)] " unsafe(x)"#;
+            m!('unsafe (x));
+            let c = r#unsafe(1);
+        "####;
+        assert_eq!(other_kinds(source), (0, 0, 0));
+    }
+
+    #[test]
+    fn only_a_parenthesis_makes_an_attribute() {
+        // A macro accepts any tokens, so these are valid source.
+        let source = "m!(unsafe [x]); m!(unsafe \"x\"); m!(unsafe ! x); m!(unsafe < x);";
+        assert_eq!(other_kinds(source), (0, 0, 0));
+    }
+
+    #[test]
+    fn counts_unsafe_extern_blocks() {
+        let source = "unsafe extern \"C\" { fn f(); }\n\
+                      pub unsafe extern { safe fn g(); }\n\
+                      extern \"C\" { fn h(); }";
+        assert_eq!(other_kinds(source), (0, 2, 0));
+    }
+
+    #[test]
+    fn an_extern_function_or_type_is_not_an_extern_block() {
+        let source = "pub unsafe extern \"efiapi\" fn a() {}\n\
+                      type B = unsafe extern \"C\" fn();\n\
+                      // unsafe extern \"C\" {\n\
+                      let c = \"unsafe extern {\";\n\
+                      m!(unsafe extern crate d {});";
+        assert_eq!(other_kinds(source), (0, 0, 0));
+    }
+
+    #[test]
+    fn counts_unsafe_impls() {
+        let source = "unsafe impl Send for S {}\n\
+                      unsafe impl<T> Sync for H<T> {}\n\
+                      impl Drop for S { fn drop(&mut self) {} }";
+        assert_eq!(other_kinds(source), (0, 0, 2));
+    }
+
+    #[test]
+    fn an_impl_in_a_comment_or_a_string_is_not_counted() {
+        let source = "// unsafe impl Send for S {}\n\
+                      /* unsafe impl Sync for S {} */\n\
+                      let a = \"unsafe impl\";\n\
+                      m!('unsafe impl); m!(r#unsafe impl); m!(not_unsafe impl);";
+        assert_eq!(other_kinds(source), (0, 0, 0));
     }
 
     #[test]
@@ -583,14 +696,23 @@ mod tests {
         let tree = TempTree::new("measure");
         tree.write("acpi/src/lib.rs", "fn l() { unsafe { m() } }");
         tree.write("apic/src/lib.rs", "unsafe fn n() { unsafe { o() } }");
-        tree.write("boot/src/main.rs", "unsafe fn a() {}");
+        tree.write(
+            "boot/src/main.rs",
+            "#[unsafe(no_mangle)]
+unsafe fn a() {}",
+        );
         tree.write("boot/src/notes.txt", "unsafe { not rust }");
         tree.write("boot/src/inner/deep.rs", "fn b() { unsafe { c() } }");
         tree.write("descriptors/src/lib.rs", "fn j() { unsafe { k() } }");
         tree.write("elf/src/lib.rs", "fn d() {}");
         tree.write("frames/src/lib.rs", "unsafe fn i() {}");
         tree.write("handoff/src/lib.rs", "unsafe fn i() {}");
-        tree.write("kernel/src/main.rs", "unsafe fn e() { unsafe { f() } }");
+        tree.write(
+            "kernel/src/main.rs",
+            "unsafe fn e() { unsafe { f() } }
+unsafe impl Sync for S {}
+unsafe extern {}",
+        );
         tree.write("paging/src/lib.rs", "fn g() { unsafe { h() } }");
         tree.write("pci/src/lib.rs", "unsafe fn p() { unsafe { q() } }");
         tree.write(
@@ -598,9 +720,20 @@ mod tests {
             "[[package]]\nname = \"outside\"\nsource = \"registry+https://example.com\"\n",
         );
         tree.write("image.efi", "12345");
+        // Two pages: one from the file, one more of memory past it.
+        let mut kernel = crate::tests::kernel_file(0b101, KERNEL_BASE + 0x40, 1);
+        kernel[104..112].copy_from_slice(&0x2000u64.to_le_bytes());
+        fs::write(tree.0.join("kernel.elf"), &kernel).expect("file is written");
 
-        let mut footprint = measure(&tree.0, &tree.0.join("image.efi")).expect("measures");
+        let mut footprint = measure(
+            &tree.0,
+            &tree.0.join("image.efi"),
+            &tree.0.join("kernel.elf"),
+        )
+        .expect("measures");
         assert_eq!(footprint.boot_image_bytes, 5);
+        assert_eq!(footprint.kernel_file_bytes, 4096);
+        assert_eq!(footprint.kernel_pages, 2);
         assert_eq!(footprint.third_party_packages, 1);
         // The folder decides the order; the report sorts it later.
         footprint.unsafe_by_file.sort_by(|a, b| a.0.cmp(&b.0));
@@ -609,47 +742,94 @@ mod tests {
             [
                 (
                     "acpi/src/lib.rs".to_owned(),
-                    UnsafeCounts { blocks: 1, fns: 0 }
+                    UnsafeCounts {
+                        blocks: 1,
+                        fns: 0,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "apic/src/lib.rs".to_owned(),
-                    UnsafeCounts { blocks: 1, fns: 1 }
+                    UnsafeCounts {
+                        blocks: 1,
+                        fns: 1,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "boot/src/inner/deep.rs".to_owned(),
-                    UnsafeCounts { blocks: 1, fns: 0 }
+                    UnsafeCounts {
+                        blocks: 1,
+                        fns: 0,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "boot/src/main.rs".to_owned(),
-                    UnsafeCounts { blocks: 0, fns: 1 }
+                    UnsafeCounts {
+                        blocks: 0,
+                        fns: 1,
+                        attributes: 1,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "descriptors/src/lib.rs".to_owned(),
-                    UnsafeCounts { blocks: 1, fns: 0 }
+                    UnsafeCounts {
+                        blocks: 1,
+                        fns: 0,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "elf/src/lib.rs".to_owned(),
-                    UnsafeCounts { blocks: 0, fns: 0 }
+                    UnsafeCounts {
+                        blocks: 0,
+                        fns: 0,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "frames/src/lib.rs".to_owned(),
-                    UnsafeCounts { blocks: 0, fns: 1 }
+                    UnsafeCounts {
+                        blocks: 0,
+                        fns: 1,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "handoff/src/lib.rs".to_owned(),
-                    UnsafeCounts { blocks: 0, fns: 1 }
+                    UnsafeCounts {
+                        blocks: 0,
+                        fns: 1,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "kernel/src/main.rs".to_owned(),
-                    UnsafeCounts { blocks: 1, fns: 1 }
+                    UnsafeCounts {
+                        blocks: 1,
+                        fns: 1,
+                        attributes: 0,
+                        extern_blocks: 1,
+                        impls: 1,
+                    }
                 ),
                 (
                     "paging/src/lib.rs".to_owned(),
-                    UnsafeCounts { blocks: 1, fns: 0 }
+                    UnsafeCounts {
+                        blocks: 1,
+                        fns: 0,
+                        ..UnsafeCounts::default()
+                    }
                 ),
                 (
                     "pci/src/lib.rs".to_owned(),
-                    UnsafeCounts { blocks: 1, fns: 1 }
+                    UnsafeCounts {
+                        blocks: 1,
+                        fns: 1,
+                        ..UnsafeCounts::default()
+                    }
                 ),
             ]
         );
@@ -661,9 +841,13 @@ mod tests {
         tree.write("acpi/src/lib.rs", "fn a() {}");
         tree.write("apic/src/lib.rs", "fn a() {}");
         tree.write("image.efi", "1");
-        let error = measure(&tree.0, &tree.0.join("image.efi"))
-            .err()
-            .expect("fails");
+        let error = measure(
+            &tree.0,
+            &tree.0.join("image.efi"),
+            &tree.0.join("kernel.elf"),
+        )
+        .err()
+        .expect("fails");
         assert!(error.contains("could not list boot/src"), "{error}");
     }
 
@@ -678,9 +862,13 @@ mod tests {
         tree.write("frames/src/lib.rs", "fn c() {}");
         tree.write("handoff/src/lib.rs", "fn c() {}");
         tree.write("image.efi", "1");
-        let error = measure(&tree.0, &tree.0.join("image.efi"))
-            .err()
-            .expect("fails");
+        let error = measure(
+            &tree.0,
+            &tree.0.join("image.efi"),
+            &tree.0.join("kernel.elf"),
+        )
+        .err()
+        .expect("fails");
         assert!(error.contains("could not list kernel/src"), "{error}");
     }
 
@@ -698,18 +886,32 @@ mod tests {
         tree.write("paging/src/lib.rs", "fn d() {}");
         tree.write("pci/src/lib.rs", "fn g() {}");
         let image = tree.0.join("image.efi");
+        let kernel = tree.0.join("kernel.elf");
 
-        let error = measure(&tree.0, &image).err().expect("no image");
+        let error = measure(&tree.0, &image, &kernel).err().expect("no image");
         assert!(error.starts_with("could not read ") && error.contains("image.efi"));
 
         tree.write("image.efi", "1");
-        let error = measure(&tree.0, &image).err().expect("no lock file");
+        let error = measure(&tree.0, &image, &kernel)
+            .err()
+            .expect("no lock file");
         assert!(error.starts_with("could not read Cargo.lock"), "{error}");
 
         tree.write("Cargo.lock", "version = 4\n");
         tree.write("boot/src/bad.rs", "/* never closed");
-        let error = measure(&tree.0, &image).err().expect("bad source");
+        let error = measure(&tree.0, &image, &kernel).err().expect("bad source");
         assert_eq!(error, "boot/src/bad.rs: unterminated block comment");
+
+        fs::remove_file(tree.0.join("boot/src/bad.rs")).expect("file is removed");
+        let error = measure(&tree.0, &image, &kernel).err().expect("no kernel");
+        assert!(
+            error.starts_with("could not read ") && error.contains("kernel.elf"),
+            "{error}"
+        );
+
+        tree.write("kernel.elf", "not an ELF file");
+        let error = measure(&tree.0, &image, &kernel).err().expect("bad kernel");
+        assert_eq!(error, "the ELF reader rejected the kernel: Truncated");
     }
 
     #[test]
@@ -776,9 +978,13 @@ mod tests {
         tree.write("paging/src/lib.rs", "");
         tree.write("pci/src/lib.rs", "");
         fs::write(tree.0.join("boot/src/main.rs"), [0xFF]).expect("file is written");
-        let error = measure(&tree.0, &tree.0.join("image.efi"))
-            .err()
-            .expect("fails");
+        let error = measure(
+            &tree.0,
+            &tree.0.join("image.efi"),
+            &tree.0.join("kernel.elf"),
+        )
+        .err()
+        .expect("fails");
         assert!(
             error.starts_with("could not read boot/src/main.rs: "),
             "{error}"
@@ -795,23 +1001,46 @@ mod tests {
     fn report_is_sorted_with_forward_slash_paths() {
         let footprint = Footprint {
             boot_image_bytes: 4096,
+            kernel_file_bytes: 53760,
+            kernel_pages: 29,
             unsafe_by_file: vec![
                 (
                     "boot/src/main.rs".into(),
-                    UnsafeCounts { blocks: 2, fns: 1 },
+                    UnsafeCounts {
+                        blocks: 2,
+                        fns: 1,
+                        attributes: 5,
+                        extern_blocks: 6,
+                        impls: 7,
+                    },
                 ),
-                ("boot/src/a.rs".into(), UnsafeCounts { blocks: 4, fns: 3 }),
+                (
+                    "boot/src/a.rs".into(),
+                    UnsafeCounts {
+                        blocks: 4,
+                        fns: 3,
+                        ..UnsafeCounts::default()
+                    },
+                ),
             ],
             third_party_packages: 7,
         };
         assert_eq!(
             report(&footprint),
             "boot image bytes: 4096\n\
+             kernel file bytes: 53760\n\
+             kernel loaded pages: 29\n\
              third-party packages: 7\n\
+             unsafe attributes in boot/src/a.rs: 0\n\
+             unsafe attributes in boot/src/main.rs: 5\n\
              unsafe blocks in boot/src/a.rs: 4\n\
              unsafe blocks in boot/src/main.rs: 2\n\
+             unsafe extern blocks in boot/src/a.rs: 0\n\
+             unsafe extern blocks in boot/src/main.rs: 6\n\
              unsafe fn declarations in boot/src/a.rs: 3\n\
-             unsafe fn declarations in boot/src/main.rs: 1\n"
+             unsafe fn declarations in boot/src/main.rs: 1\n\
+             unsafe impls in boot/src/a.rs: 0\n\
+             unsafe impls in boot/src/main.rs: 7\n"
         );
     }
 }

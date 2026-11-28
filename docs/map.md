@@ -51,7 +51,13 @@ written without code marks because they exist only after a build:
 | File | What it is |
 |---|---|
 | EFI/BOOT/BOOTX64.EFI | The boot stage, which the firmware runs |
-| EFI/BISMUTH/KERNEL.ELF | The kernel. The boot stage reads, checks and copies it into memory, maps it at its address and starts it |
+| EFI/BISMUTH/KERNEL.ELF | The kernel, the lean file: without debug information or symbols. The boot stage reads, checks and copies it into memory, maps it at its address and starts it |
+
+Next to the build, in target/x86_64-unknown-none/debug, bismuth-kernel is
+the file the linker made, bismuth-kernel.full the same with its sections
+laid out after the loaded contents, for a debugger, and
+bismuth-kernel.lean the copy that goes on the disks. The full and lean
+files load the same pages (`docs/boot.md`, "The kernel file").
 
 `cargo xtask test` also lays out one disk per boot scenario under
 target/boot-scenarios, each with the boot stage and its own kernel file, or
@@ -63,10 +69,10 @@ to damage the hand-off structure (kept in target/boot-damaged).
 
 | Part | Where | What it does |
 |---|---|---|
-| Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands, `issue-list` among them. Its usage text is the list of commands. `test` runs the boot scenarios. `check` also runs the ELF reader and the placement rules on the kernel file |
+| Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands, `issue-list` among them. Its usage text is the list of commands. `test` runs the boot scenarios. Builds the kernel so that the folder leaves no trace in it, and writes its full and lean files. `check` also runs the ELF reader and the placement rules on the kernel file, checks the full and lean files load the same pages, and builds the kernel in a copy of the repository to check it gets the same bytes |
 | Command table check | `xtask/src/command_tables.rs` | A unit test that fails when the command tables in `AGENTS.md` and `README.md` differ from the commands in the usage text |
 | Code host commands | `xtask/src/host.rs` | `pr-open`, `pr-edit`, `pr-ready`, `pr-wait`, `issue-list`, `issue-read`, `issue-comment` and `issue-new`, through `gh`. Checks every title and body with the rule in `tools/check-attribution.sh` before sending it |
-| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per file of the boot stage, the kernel and the libraries, and third-party packages, and compares the report with the stored one |
+| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, the lean kernel file's size and loaded pages, `unsafe` counts per file and per kind (blocks, `unsafe fn` declarations, `#[unsafe(...)]` attributes, `unsafe extern` blocks, `unsafe impl`s) of the boot stage, the kernel and the libraries, and third-party packages, and compares the report with the stored one |
 | Stored footprint | `snapshots/footprint.txt` | The expected footprint report. `cargo xtask snapshot --update` rewrites it |
 | Kernel build settings | `.cargo/config.toml` | Builds the kernel as a fixed-address executable at `0xFFFF_FFFF_8000_0000`, and defines the `cargo xtask` alias |
 | Pinned compiler | `rust-toolchain.toml` | The Rust version and the build targets for the boot stage (UEFI) and the kernel |
