@@ -100,8 +100,8 @@ The report is sorted `key: value` lines. Today it holds:
   `unsafe attributes in <file>`, `unsafe extern blocks in <file>` and
   `unsafe impls in <file>`: for each Rust file under `boot/src`,
   `kernel/src`, `acpi/src`, `apic/src`, `descriptors/src`, `elf/src`,
-  `frames/src`, `handoff/src`, `paging/src` and `pci/src`, how many
-  `unsafe { ... }` blocks, `unsafe fn` declarations, `#[unsafe(...)]`
+  `frames/src`, `handoff/src`, `nvme/src`, `paging/src` and `pci/src`,
+  how many `unsafe { ... }` blocks, `unsafe fn` declarations, `#[unsafe(...)]`
   attributes (such as `#[unsafe(no_mangle)]` and `#[unsafe(naked)]`),
   `unsafe extern` blocks and `unsafe impl`s it contains. `unsafe` marks code
   the compiler cannot check for memory safety, so its count is a rough

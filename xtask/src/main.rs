@@ -1675,6 +1675,11 @@ fn check() -> Result<()> {
             lints("bismuth-handoff", &["--all-targets"]),
         ),
         cargo_step(
+            "unit tests (nvme)",
+            vec!["test", "--package", "bismuth-nvme"],
+        ),
+        cargo_step("lints (nvme)", lints("bismuth-nvme", &["--all-targets"])),
+        cargo_step(
             "unit tests (paging)",
             vec!["test", "--package", "bismuth-paging"],
         ),
