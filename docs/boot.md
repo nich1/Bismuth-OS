@@ -23,7 +23,7 @@ The firmware calls the function `efi_main` and passes it a pointer to the
 *system table*: a structure of pointers to services the firmware offers, such
 as printing text.
 
-The boot stage then does six things:
+The boot stage then does seven things:
 
 1. **Writes `BISMUTH BOOT OK` to the serial port.** The serial port is an old,
    very simple device: send it a byte and the byte goes out on a wire. It
@@ -74,7 +74,18 @@ The boot stage then does six things:
    of a segment or of the stack is missing or has the wrong frame or
    permissions, the guard page below the stack is mapped, or the bytes
    read back differ.
-6. **Jumps to the kernel.** It writes `BISMUTH KERNEL JUMP
+6. **Leaves the firmware.** It reads the firmware's memory map and tells
+   the firmware to step aside (see "Leaving the firmware" below), turns
+   interrupts off, and writes `BISMUTH FIRMWARE LEFT descriptors=102
+   usable=52559` (the numbers are an example): how many entries the map
+   has, and how many 4 KiB pages of it are free for the kernel. If the
+   firmware refuses, it writes a line starting `BISMUTH FIRMWARE EXIT
+   ERROR:` instead: there is no memory map or exit service, asking for the
+   map's size or reading the map failed, there is no memory for the map,
+   the map no longer fits its buffer, its entries are smaller than the
+   specification's, the exit failed, or the map changed twice in a row.
+   The status is given where the firmware returned one.
+7. **Jumps to the kernel.** It writes `BISMUTH KERNEL JUMP
    entry=0xffffffff800013a0 stack=0xffffffff80000000` on the serial port
    (the entry point is an example; the stack's top is fixed), then turns
    interrupts off, moves to the kernel's stack and jumps to the entry
@@ -86,9 +97,66 @@ processor to sleep in a loop, because it is the only thing running. There
 is no screen to rely on and nobody to report to, so a clear message on the
 serial port is the only way to learn what went wrong.
 
-The boot stage does not yet collect what the kernel needs to know about
-the machine (above all, the map of usable memory), pass it to the kernel,
-or tell the firmware to step aside. Those come next.
+The boot stage keeps the memory map, but does not yet pass it, or
+anything else, to the kernel. That comes next.
+
+### Leaving the firmware
+
+Until now the firmware owns the machine: its *boot services* hand out
+memory, run its drivers and answer its timer's interrupts. Leaving it, by
+the call `ExitBootServices`, ends all of that for good. From then on the
+firmware does nothing unless asked through its few *runtime services*,
+and the boot stage, then the kernel, is the only thing running. The
+firmware's console, its disk and its memory allocation are gone with it.
+
+The firmware only lets go if the boot stage shows that it knows the
+current state of memory. The *memory map* is the firmware's list of every
+range of physical memory and what it is used for: free, the firmware's
+own, the boot stage's, holding ACPI tables, device registers, and so on.
+Each version of the map has a *key*, and `ExitBootServices` takes the key
+of the map last read. Any allocation changes the map and its key, so the
+map must be read immediately before the call, after everything that
+allocates. Then the map the kernel gets is the one in force when the
+firmware stepped aside.
+
+So the boot stage does this, once the kernel's pages, its tables and its
+stack are all allocated and the firmware's console has printed its last
+line:
+
+1. It asks the firmware how large the map is.
+2. It allocates a buffer for the map (loader data, never freed), with
+   room for eight entries more than asked for: allocating the buffer can
+   itself split a free range into up to three, and the firmware may
+   allocate for itself in between.
+3. It reads the map into the buffer, and calls `ExitBootServices` with
+   its key.
+4. If the firmware answers that the key is stale, the map changed in
+   between, so it reads the map again into the same buffer, without
+   allocating, and tries once more. A second refusal, any other error, or
+   a map that no longer fits is a failure. After a refused
+   `ExitBootServices` only the firmware's memory services may be called,
+   and the boot stage calls nothing but `GetMemoryMap`; the serial port
+   and QEMU's exit device are written directly, not through the firmware.
+5. It turns interrupts off at once: the firmware's timer and its
+   handlers belonged to the boot services that have just ended. (Not
+   before the call: if it fails, boot services keep running and expect
+   interrupts as they left them. QEMU's firmware has already turned them
+   off by the time the call returns.)
+
+It counts the entries by stepping through the map by the entry size the
+firmware states, which may be larger than the structure in the
+specification (40 bytes; QEMU's firmware uses 48), and counts as usable
+only the entries of type `EfiConventionalMemory`, through the same table
+the hand-off structure uses (`docs/handoff.md`). The map's address, size,
+entry size and entry version are kept for the kernel's hand-off, which
+comes next.
+
+Nothing in the boot test can tell whether `ExitBootServices` really ran:
+with the call left out, every scenario still passes. What shows it ran is
+that, done by hand, a firmware call made afterwards (printing on the
+firmware's console) faults instead of printing, and that the firmware
+clears the system table's console and boot services pointers, which stay
+set without the call.
 
 ### How the kernel is entered
 
@@ -114,17 +182,33 @@ relies on all of it, and must not rely on anything not listed.
   mappings are all still there in the lower half, the boot stage's
   among them, but the kernel must not rely on them: they go once the
   kernel has its own tables.
+- **Memory the kernel must not reuse yet:** the lower levels of the
+  tables in CR3 are the firmware's own, shared by the copied top-level
+  table, and they live in memory the firmware lent for its boot services
+  (`EfiBootServicesData`). So does its interrupt table, and the handlers
+  that table points to are in boot-services code (`EfiBootServicesCode`).
+  Its segment descriptor table was found in runtime-services data under
+  QEMU's firmware; another firmware may keep it elsewhere. Boot services
+  have ended, so boot-services code and data are the system's to take
+  back, but the processor still reads all of it.
+  The kernel must not reuse it until it runs on tables of its own and has
+  loaded descriptor and interrupt tables of its own. The kernel's
+  segments, its stack, the frames of the new tables and the memory map's
+  buffer are loader data, which nothing else will take.
 - **`IA32_EFER.NXE`:** on. The tables mark pages that may not run code
   with a bit that is reserved, and faults, while it is off. The boot
   stage turns it on if the firmware has not.
 - **`CR0.WP`:** as the firmware left it, which the `PLACED` line reports.
   When it is clear, the kernel can write its own read-only pages.
-- **Interrupts:** off (`RFLAGS.IF` clear). But the firmware's interrupt
-  table is still loaded, so a non-maskable interrupt, a machine check or
-  a fault in the kernel runs the firmware's handler, on the kernel's
-  stack, in the lower half, which is still mapped; the kernel relies on
-  that table and the firmware's segment table only until it has loaded
-  its own, its first act after checking this state (`docs/kernel.md`).
+- **Interrupts:** off (`RFLAGS.IF` clear), since just after boot services
+  ended, and again in the jump. But the firmware's interrupt table is
+  still loaded, so a non-maskable interrupt, a machine check or a fault
+  in the kernel runs the firmware's handler, on the kernel's stack. That
+  handler is in the lower half, which is still mapped, and in QEMU it
+  still prints its report, but it belongs to the boot services that have
+  ended. The kernel relies on that table and the firmware's segment
+  table only until it has loaded its own, its first act after checking
+  this state (`docs/kernel.md`).
 - **Direction flag:** clear (`RFLAGS.DF`). The other bits of `RFLAGS` are
   undefined.
 - **Stack pointer:** `0xFFFF_FFFF_7FFF_FFF8`, eight below the top. On entry
@@ -135,11 +219,15 @@ relies on all of it, and must not rely on anything not listed.
   the kernel yet. The other control registers, and the floating-point and
   vector state, are as the firmware left them; the kernel is built not to
   use the floating-point and vector registers.
-- **The firmware:** boot services are still running, because nothing has
-  told the firmware to step aside yet, but the kernel must not call them,
-  and the boot stage does not after the jump.
+- **The firmware:** boot services have ended (`ExitBootServices`
+  succeeded), so the firmware's console, disk and memory services are
+  gone. The specification says the firmware should clear the system
+  table's pointers to them, and QEMU's firmware does, but that is not
+  guaranteed. Its runtime services remain, but nothing is passed to the
+  kernel to find them with yet.
 - **The serial port:** set to 115200 baud, 8 data bits, no parity, one
-  stop bit by the boot stage, and written to by it and by the firmware.
+  stop bit by the boot stage, and written to by it and, until boot
+  services ended, by the firmware.
   The kernel does not rely on that: it waits for the port to finish
   sending the boot stage's last bytes, then sets it up again the same way
   itself.
@@ -334,7 +422,9 @@ QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
    kernel; nothing uses it now.)
 5. A scenario passes if the serial output contains `BISMUTH BOOT OK` and then
    its expected lines in order, and QEMU exits with the expected code within
-   the time limit. Anything else fails, and the captured output is shown.
+   the time limit. Where a number can only be known within limits, the
+   expected line gives a range, written `[40000..=60000]`, that the printed
+   number must fall in. Anything else fails, and the captured output is shown.
    If the firmware reports a processor exception (a line starting `!!!!
    X64 Exception Type`), for example because the kernel faulted, the test
    stops QEMU at once rather than wait for the time limit, since the
@@ -348,7 +438,12 @@ bytes=...`, matching what the ELF reader finds in the same file, then
 the test lays out from the file itself, then `BISMUTH KERNEL PLACED` with
 the same numbers and each segment's permissions from its flags (`wp=`
 exactly `0` or `1`), then the firmware console's `Bismuth kernel addresses
-checked.`, then `BISMUTH KERNEL JUMP entry=... stack=0xffffffff80000000`
+checked.`, then `BISMUTH FIRMWARE LEFT descriptors=... usable=...` with
+from 1 to 512 descriptors and from 40000 to 60000 usable pages (QEMU is
+given 256 MiB, 65536 pages, of which the firmware and the boot stage keep
+some; QEMU's firmware leaves about 52500 free; counting every type as
+usable, or stepping through the map by the wrong entry size, falls far
+outside), then `BISMUTH KERNEL JUMP entry=... stack=0xffffffff80000000`
 with the file's entry point.
 
 | Disk | Expected lines | Exit code |
@@ -398,9 +493,14 @@ structure.
 The structures in `boot/src/uefi.rs` and the files beside it follow the UEFI
 specification (version 2.10), declared by hand, and their comments name the
 sections: 2.3.4 for the identity mapping on x64, 4.3 for the system table,
-4.4 for the boot services table, 7.2 for memory and page allocation, 7.3 for looking up a protocol, 9.1 for the Loaded Image
+4.4 for the boot services table, 7.2 for memory and page allocation and
+for `GetMemoryMap` and the memory descriptor, 7.3 for looking up a
+protocol, 7.4 for `ExitBootServices`, 9.1 for the Loaded Image
 Protocol, 12.4 for text output, 13.4 for the Simple File System Protocol and
-13.5 for the File Protocol. Only the fields the boot stage uses are declared.
+13.5 for the File Protocol; the status values are in appendix D. Only the
+fields the boot stage uses are declared. The order of the calls that end
+boot services, and the count of the map, are in `boot/src/leave.rs`,
+which has no firmware code.
 
 The ELF layouts in `elf/src/lib.rs` follow the System V ABI's ELF
 specification (chapters 4 and 5) and its x86-64 supplement, as the comments
@@ -417,7 +517,8 @@ manual, volume 2, chapter 3, section "System-Control Registers"; the
 no-execute check reads `CPUID` leaf 80000001H (Intel volume 2A, the
 `CPUID` entry; AMD volume 3, appendix E).
 
-The jump to the kernel in `boot/src/cpu.rs` uses `CLI`, `CLD`, `LEA` and
+Interrupts are turned off after leaving the firmware with `CLI` (Intel
+volume 2A). The jump to the kernel in `boot/src/cpu.rs` uses `CLI`, `CLD`, `LEA` and
 `JMP` (Intel volume 2A, each instruction's entry), and the state it leaves
 the stack and flags in is what the System V AMD64 psABI, section 3.2
 "Function Calling Sequence", asks of a function's entry. The kernel's

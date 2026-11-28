@@ -26,6 +26,11 @@ mod host;
 #[cfg(test)]
 #[path = "../../boot/src/report.rs"]
 mod boot_report;
+// The same for the order of the calls that end boot services. Named as in
+// the boot stage, where the report text finds it as `crate::leave`.
+#[cfg(test)]
+#[path = "../../boot/src/leave.rs"]
+mod leave;
 // The same for the kernel's checks of the state it was entered in.
 #[cfg(test)]
 #[path = "../../kernel/src/entry.rs"]
@@ -363,6 +368,60 @@ const CONSOLE_AFTER_SWITCH: &str = "Bismuth kernel addresses checked.";
 /// At the end of an expected line, stands for exactly `0` or `1`.
 const BIT: &str = "?";
 
+/// The line the boot stage prints once boot services have ended, with the
+/// ranges the descriptor count and the usable pages must fall in, written
+/// `[<min>..=<max>]` (see [`line_matches`]).
+///
+/// QEMU is given 256 MiB, 65536 pages. The OVMF build this was written
+/// with reports 102 descriptors and 52559 usable pages (about 205 MiB):
+/// the firmware keeps the rest for its own code and data, its runtime
+/// services and its ACPI tables, and the boot stage holds the kernel file,
+/// its pages and its tables. 1 to 512 descriptors allows for other
+/// firmware builds. 40000 to 60000 pages (about 156 to 234 MiB) leaves
+/// room either way while staying below what 256 MiB minus the firmware's
+/// own several MiB could free. Counting every type instead adds the
+/// firmware's memory and its device ranges: 3277728 pages there. Stepping
+/// by the specification's 40 bytes instead of the firmware's stride reads
+/// types and page counts from other fields: 8730 pages there.
+fn firmware_left_line() -> String {
+    "BISMUTH FIRMWARE LEFT descriptors=[1..=512] usable=[40000..=60000]".to_string()
+}
+
+/// Whether `printed` is the expected line `expected`. An expected line
+/// ending in [`BIT`] matches only `0` or `1` there; a `[<min>..=<max>]` in
+/// one matches a decimal number in that range. Everything else must be the
+/// same.
+fn line_matches(expected: &str, printed: &str) -> bool {
+    if let Some(start) = expected.strip_suffix(BIT) {
+        return printed
+            .strip_prefix(start)
+            .is_some_and(|rest| rest == "0" || rest == "1");
+    }
+    let (mut expected, mut printed) = (expected, printed);
+    while let Some(open) = expected.find('[') {
+        let (literal, range) = expected.split_at(open);
+        let Some(after) = printed.strip_prefix(literal) else {
+            return false;
+        };
+        let Some((bounds, rest)) = range[1..].split_once(']') else {
+            return false;
+        };
+        let Some((Ok(min), Ok(max))) = bounds
+            .split_once("..=")
+            .map(|(min, max)| (min.parse::<u64>(), max.parse::<u64>()))
+        else {
+            return false;
+        };
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        match after[..digits].parse::<u64>() {
+            Ok(value) if (min..=max).contains(&value) => {}
+            _ => return false,
+        }
+        (expected, printed) = (rest, &after[digits..]);
+    }
+    printed == expected
+}
+
 /// The line the boot stage prints on the serial port just before it jumps
 /// to the kernel file `elf`'s entry point on the kernel's stack.
 fn jump_line(elf: &bismuth_elf::Elf) -> String {
@@ -374,9 +433,9 @@ fn jump_line(elf: &bismuth_elf::Elf) -> String {
 }
 
 /// A boot of the kernel file `kernel` that gets as far as the jump: the
-/// `FILE OK`, `COPIED`, `PLACED` and console lines, then the `JUMP` line,
-/// then the kernel's tables line and `last`, and QEMU exiting with
-/// `exit_code`.
+/// `FILE OK`, `COPIED`, `PLACED` and console lines, the `FIRMWARE LEFT`
+/// line, then the `JUMP` line, then the kernel's tables line and `last`,
+/// and QEMU exiting with `exit_code`.
 fn started(name: &'static str, kernel: &[u8], last: &str, exit_code: i32) -> Result<Scenario> {
     let elf = bismuth_elf::Elf::parse(kernel)
         .map_err(|error| format!("the ELF reader rejected the {name} kernel: {error:?}"))?;
@@ -391,6 +450,7 @@ fn started(name: &'static str, kernel: &[u8], last: &str, exit_code: i32) -> Res
         copied_line(kernel, &elf),
         placed_line(kernel, &elf),
         CONSOLE_AFTER_SWITCH.to_string(),
+        firmware_left_line(),
         jump_line(&elf),
         TABLES_MARKER.to_string(),
         last.to_string(),
@@ -1021,13 +1081,7 @@ fn boot_failure(scenario: &Scenario, status: Option<i32>, serial: &str) -> Optio
     }
     let mut printed = serial.lines().map(|line| line.trim_end_matches('\r'));
     for line in &scenario.lines {
-        let matches = |printed: &str| match line.strip_suffix(BIT) {
-            Some(start) => printed
-                .strip_prefix(start)
-                .is_some_and(|rest| rest == "0" || rest == "1"),
-            None => printed == line,
-        };
-        if !printed.any(matches) {
+        if !printed.any(|printed| line_matches(line, printed)) {
             return Some(format!("serial output did not contain {line:?} in order"));
         }
     }
@@ -1579,6 +1633,32 @@ mod tests {
     }
 
     #[test]
+    fn a_range_in_an_expected_line_matches_only_a_number_inside_it() {
+        let expected = "LEFT n=[1..=512] pages=[40000..=60000]";
+        for (printed, passes) in [
+            ("LEFT n=1 pages=40000", true),
+            ("LEFT n=512 pages=60000", true),
+            ("LEFT n=97 pages=52313", true),
+            ("LEFT n=0 pages=52313", false),
+            ("LEFT n=513 pages=52313", false),
+            ("LEFT n=97 pages=39999", false),
+            ("LEFT n=97 pages=60001", false),
+            ("LEFT n=97 pages=", false),
+            ("LEFT n= pages=52313", false),
+            ("LEFT n=97 pages=52313 more", false),
+            ("LEFT n=97 pages=52313x", false),
+            ("LEFT m=97 pages=52313", false),
+            ("LEFT n=97 pages=99999999999999999999999", false),
+            ("LEFT n=[1..=512] pages=[40000..=60000]", false),
+        ] {
+            assert_eq!(super::line_matches(expected, printed), passes, "{printed}");
+        }
+        // A line without a range must be the same.
+        assert!(super::line_matches("plain", "plain"));
+        assert!(!super::line_matches("plain", "plainer"));
+    }
+
+    #[test]
     fn the_scenarios_damage_the_kernel_as_named() {
         let kernel = two_segment_kernel();
         let all = scenarios(&kernel).expect("scenarios");
@@ -1816,19 +1896,31 @@ mod tests {
         let all = scenarios(&kernel).expect("scenarios");
         let jump = "BISMUTH KERNEL JUMP entry=0xffffffff80001040 stack=0xffffffff80000000";
         for scenario in [&all[0], &all[8]] {
-            assert_eq!(scenario.lines.len(), 8, "{}", scenario.name);
-            assert_eq!(scenario.lines[5], jump);
-            assert_eq!(scenario.lines[6], "BISMUTH KERNEL TABLES OK");
-            assert_eq!(scenario.lines[7], "BISMUTH KERNEL OK");
+            assert_eq!(scenario.lines.len(), 9, "{}", scenario.name);
+            assert_eq!(scenario.lines[4], "Bismuth kernel addresses checked.");
+            assert_eq!(
+                scenario.lines[5],
+                "BISMUTH FIRMWARE LEFT descriptors=[1..=512] usable=[40000..=60000]"
+            );
+            assert_eq!(scenario.lines[6], jump);
+            assert_eq!(scenario.lines[7], "BISMUTH KERNEL TABLES OK");
+            assert_eq!(scenario.lines[8], "BISMUTH KERNEL OK");
             assert_eq!(scenario.exit_code, 65);
         }
         // The kernel exits now, so nothing expects the boot stage's success.
         assert!(all.iter().all(|s| s.exit_code != QEMU_SUCCESS_EXIT));
         assert!(all.iter().all(|s| s.fault.is_none()));
+        // Only the scenarios that reach the kernel leave the firmware.
+        let leaving: Vec<_> = all
+            .iter()
+            .filter(|s| s.lines.iter().any(|l| l.contains("FIRMWARE")))
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(leaving, ["normal", "long-segment"]);
         let panic = panic_scenario(&kernel).expect("scenario");
         assert_eq!(panic.name, "kernel-panic");
-        assert_eq!(panic.lines[..7], all[0].lines[..7]);
-        assert_eq!(panic.lines[7], "BISMUTH KERNEL PANIC");
+        assert_eq!(panic.lines[..8], all[0].lines[..8]);
+        assert_eq!(panic.lines[8], "BISMUTH KERNEL PANIC");
         assert_eq!(panic.absent, ["BISMUTH KERNEL OK"]);
         assert_eq!(panic.exit_code, 67);
     }
@@ -1900,7 +1992,7 @@ mod tests {
             assert_eq!(scenario.name, name);
             assert_eq!(scenario.exit_code, 67, "{name}");
             // The lines of a normal boot up to the kernel's tables line.
-            assert_eq!(scenario.lines[..], normal.lines[..7], "{name}");
+            assert_eq!(scenario.lines[..], normal.lines[..8], "{name}");
             assert_eq!(scenario.absent, ["BISMUTH KERNEL OK"], "{name}");
             let fault = scenario.fault.as_ref().expect("a fault");
             assert_eq!(fault.start, format!("BISMUTH KERNEL FAULT {start}"));

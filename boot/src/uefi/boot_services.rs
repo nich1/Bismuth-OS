@@ -1,12 +1,14 @@
-//! The boot services this stage calls: allocating memory and pages and
-//! finding a protocol on a handle. UEFI specification 2.10, section 4.4 (the table),
-//! section 7.2 (memory allocation) and section 7.3 (protocol handler
-//! services).
+//! The boot services this stage calls: allocating memory and pages, reading
+//! the memory map, finding a protocol on a handle, and ending boot services.
+//! UEFI specification 2.10, section 4.4 (the table), section 7.2 (memory
+//! allocation and the memory map), section 7.3 (protocol handler services)
+//! and section 7.4 (`ExitBootServices()`).
 
 use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 use super::{Guid, Handle, SUCCESS, Status, SystemTable, TableHeader};
+use crate::leave::{self, ExitFailure, Map, MapRead};
 use crate::report::{Failure, PlaceFailure, Step};
 
 /// "BOOTSERV" read as a little-endian number, the boot services table's
@@ -47,18 +49,30 @@ pub(super) struct Table {
             memory: *mut u64,
         ) -> Status,
     >,
-    /// `FreePages`, `GetMemoryMap`.
-    _before_allocate_pool: [usize; 2],
+    /// `FreePages`.
+    _before_get_memory_map: usize,
+    /// Section 7.2, `GetMemoryMap()`: the buffer's size, read and written
+    /// with the map's size (or the size it needs); the buffer; and places
+    /// for the map key, the descriptor size and the descriptor version.
+    get_memory_map: Option<GetMemoryMap>,
     /// Section 7.2, `AllocatePool()`.
     allocate_pool: Option<
         unsafe extern "efiapi" fn(pool_type: u32, size: usize, buffer: *mut *mut c_void) -> Status,
     >,
-    /// `FreePool`, six event and timer services, three protocol interface
-    /// services, `HandleProtocol`, a reserved entry, `RegisterProtocolNotify`,
-    /// `LocateHandle`, `LocateDevicePath`, `InstallConfigurationTable`, four
-    /// image services, `ExitBootServices`, `GetNextMonotonicCount`, `Stall`,
-    /// `SetWatchdogTimer`, `ConnectController`, `DisconnectController`.
-    _before_open_protocol: [usize; 26],
+    /// `FreePool` (6); six event and timer services: `CreateEvent`,
+    /// `SetTimer`, `WaitForEvent`, `SignalEvent`, `CloseEvent`, `CheckEvent`
+    /// (7 to 12); `InstallProtocolInterface`, `ReinstallProtocolInterface`,
+    /// `UninstallProtocolInterface`, `HandleProtocol`, a reserved entry,
+    /// `RegisterProtocolNotify`, `LocateHandle`, `LocateDevicePath`,
+    /// `InstallConfigurationTable` (13 to 21); `LoadImage`, `StartImage`,
+    /// `Exit`, `UnloadImage` (22 to 25): 20 entries.
+    _before_exit_boot_services: [usize; 20],
+    /// Section 7.4, `ExitBootServices()`: this program's image handle and the
+    /// key of the current memory map. Entry 26, counting `RaiseTPL` as 0.
+    exit_boot_services: Option<ExitBootServices>,
+    /// `GetNextMonotonicCount`, `Stall`, `SetWatchdogTimer` (27 to 29),
+    /// `ConnectController`, `DisconnectController` (30, 31).
+    _before_open_protocol: [usize; 5],
     /// Section 7.3, `OpenProtocol()`.
     open_protocol: Option<
         unsafe extern "efiapi" fn(
@@ -71,6 +85,30 @@ pub(super) struct Table {
         ) -> Status,
     >,
 }
+
+/// Section 7.2, `GetMemoryMap()`.
+type GetMemoryMap = unsafe extern "efiapi" fn(
+    memory_map_size: *mut usize,
+    memory_map: *mut u8,
+    map_key: *mut usize,
+    descriptor_size: *mut usize,
+    descriptor_version: *mut u32,
+) -> Status;
+
+/// Section 7.4, `ExitBootServices()`.
+type ExitBootServices = unsafe extern "efiapi" fn(image: Handle, map_key: usize) -> Status;
+
+// Each function's place in the table: after the 24-byte header, entry `n`
+// (counting `RaiseTPL` as 0, in the order of section 4.4) is at
+// 24 + 8 * n. A wrong place would call another function.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(Table, allocate_pages) == 24 + 8 * 2);
+    assert!(offset_of!(Table, get_memory_map) == 24 + 8 * 4);
+    assert!(offset_of!(Table, allocate_pool) == 24 + 8 * 5);
+    assert!(offset_of!(Table, exit_boot_services) == 24 + 8 * 26);
+    assert!(offset_of!(Table, open_protocol) == 24 + 8 * 32);
+};
 
 /// The firmware's boot services, usable while they are running, and the
 /// handle of this program's image.
@@ -178,6 +216,37 @@ impl BootServices {
         Ok((physical, memory))
     }
 
+    /// Reads the memory map and ends boot services, in the order
+    /// [`leave::leave`] makes the calls. Takes `self`, so no boot service
+    /// can be called through it afterwards: none may be after a success,
+    /// and after a failed `ExitBootServices()` only the memory allocation
+    /// services may be (section 7.4), and nothing here calls them then.
+    /// Returns the map and its bytes, which stay this program's.
+    pub fn leave(self) -> Result<(Map, &'static [u8]), ExitFailure> {
+        let table = self.table();
+        let (Some(get_memory_map), Some(exit_boot_services)) =
+            (table.get_memory_map, table.exit_boot_services)
+        else {
+            return Err(ExitFailure::NoService);
+        };
+        let mut firmware = Leaving {
+            services: &self,
+            get_memory_map,
+            exit_boot_services,
+            buffer: None,
+        };
+        let map = leave::leave(&mut firmware)?;
+        // SAFETY: `map.address` is the buffer `Leaving::allocate` got from
+        // the firmware: loader data, 8-byte aligned, never freed, and only
+        // written by `GetMemoryMap()`, which reported `map.size` bytes,
+        // which `leave` checked fit it. Boot services have ended, so
+        // nothing writes it any more, and the firmware's lower mappings,
+        // under which its physical address is its address, are still in
+        // the tables in use (`map.rs` keeps them).
+        let bytes = unsafe { core::slice::from_raw_parts(map.address as *const u8, map.size) };
+        Ok((map, bytes))
+    }
+
     /// Looks up the interface of protocol `guid` on `handle`.
     ///
     /// # Safety
@@ -212,5 +281,68 @@ impl BootServices {
             return Err(Failure::Firmware(step, status));
         }
         NonNull::new(interface.cast()).ok_or(Failure::NoInterface(step))
+    }
+}
+
+/// The real calls behind [`leave::Firmware`], and the map's buffer once it
+/// is allocated: its address and size.
+struct Leaving<'a> {
+    services: &'a BootServices,
+    get_memory_map: GetMemoryMap,
+    exit_boot_services: ExitBootServices,
+    buffer: Option<(NonNull<u8>, usize)>,
+}
+
+impl leave::Firmware for Leaving<'_> {
+    fn memory_map(&mut self) -> MapRead {
+        let (buffer, mut size) = match self.buffer {
+            Some((buffer, capacity)) => (buffer.as_ptr(), capacity),
+            None => (ptr::null_mut(), 0),
+        };
+        let (mut key, mut descriptor_size, mut version) = (0, 0, 0);
+        // SAFETY: the function comes from the checked table. Boot services
+        // are running, or `ExitBootServices()` has just failed, after which
+        // `GetMemoryMap()` may still be called (section 7.4). The four
+        // places are valid for the firmware to write. The buffer is null
+        // with a size of zero, which only asks for the size (section 7.2),
+        // or the `size` bytes `allocate` got from the firmware, 8-byte
+        // aligned as descriptors need, which nothing else uses.
+        let status = unsafe {
+            (self.get_memory_map)(
+                &mut size,
+                buffer,
+                &mut key,
+                &mut descriptor_size,
+                &mut version,
+            )
+        };
+        MapRead {
+            status,
+            size,
+            key,
+            descriptor_size,
+            version,
+        }
+    }
+
+    fn allocate(&mut self, size: usize) -> Result<u64, Option<Status>> {
+        let buffer = self
+            .services
+            .allocate(size)
+            .map_err(|failure| match failure {
+                Failure::Firmware(_, status) => Some(status),
+                _ => None,
+            })?;
+        self.buffer = Some((buffer, size));
+        Ok(buffer.as_ptr() as u64)
+    }
+
+    fn exit(&mut self, key: usize) -> Status {
+        // SAFETY: the function comes from the checked table and the handle
+        // is the image handle the firmware passed to the entry point. After
+        // it succeeds no boot service is called: `leave` makes no call
+        // after a successful exit, and `BootServices::leave` consumed the
+        // boot services.
+        unsafe { (self.exit_boot_services)(self.services.image, key) }
     }
 }
