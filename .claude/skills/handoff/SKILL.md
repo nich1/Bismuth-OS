@@ -16,6 +16,7 @@ not written down gets redone or guessed.
 
 2. **Write the resume note as a comment on the issue:**
    - what is finished, with the branch name;
+   - the base branch, if it is not `main`;
    - the next concrete step;
    - anything learned that is not yet in the repository;
    - anything tried that did not work, and why.
@@ -28,8 +29,9 @@ not written down gets redone or guessed.
 
 1. **Read the issue and its latest resume note.**
 2. **Look at the branch and any open pull request.** `git log <base>..branch`,
-   where `<base>` is the base branch (`main` unless the task is stacked on an
-   open pull request), the diff, the checks.
+   where `<base>` is the base branch named in the plan comment or resume note
+   on the issue, or `main` if neither names one. The pull request always
+   shows `main`, so do not read the base from it. Then the diff, the checks.
    *Check:* you can say what is done and what is next without rerunning
    finished work.
 3. **Confirm the starting point.** Run `cargo xtask check` on the branch.

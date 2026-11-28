@@ -18,7 +18,8 @@ How to work:
    Then break each new branch or check once on purpose, confirm a test
    fails, and restore it.
 3. If the change adds, moves or removes something, update `docs/map.md` in
-   the same change. `cargo xtask check` fails without it.
+   the same change. `cargo xtask check` fails if a row names a path that no
+   longer exists, but not if an addition has no row.
 4. Run `cargo xtask check`. Fix what it reports. If you cannot run part of it
    (for example QEMU is missing), say so; do not guess the result.
 

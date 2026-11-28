@@ -22,7 +22,8 @@ description: Commit the intended work, push the branch and open a pull request a
 
 4. **Write the description from the template** in a file. Lead with the
    problem and the result. Then the evidence from the `verify` skill. Then
-   what it adds to the system. Then what was not verified.
+   what it adds to the system. Then what was not verified. Write `Closes #N`
+   for each issue the pull request finishes, so the merge closes it.
    *Check:* every section of the template is filled in.
 
 5. **Push and open it:** `cargo xtask pr-open --title <text> --body-file
