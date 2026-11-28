@@ -162,7 +162,10 @@ impl<'a> Mcfg<'a> {
 /// segment group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Allocation {
-    /// The physical address of the configuration space of the start bus.
+    /// The physical address the configuration space of bus 0 would have
+    /// (PCI Firmware Specification, "MCFG Table Description"). It is bus
+    /// 0's address even when the allocation starts at a later bus, so the
+    /// start bus's own space is `start_bus` MiB above it.
     pub base: u64,
     /// The PCI segment group.
     pub segment: u16,
@@ -175,16 +178,16 @@ pub struct Allocation {
 impl Allocation {
     /// The physical address of the 4096-byte configuration space of a
     /// function (PCI Express Base Specification, "PCI Express Enhanced
-    /// Configuration Access Mechanism (ECAM)"): the base plus the bus,
-    /// counted from the start bus, in bits 27:20, the device in bits 19:15
-    /// and the function in bits 14:12.
+    /// Configuration Access Mechanism (ECAM)"): the base plus the bus in
+    /// bits 27:20, the device in bits 19:15 and the function in bits 14:12.
+    /// The bus is not counted from the start bus: the base is bus 0's
+    /// address even when the allocation starts at a later bus (PCI Firmware
+    /// Specification, "MCFG Table Description"). The bus must lie in
+    /// `start_bus..=end_bus`.
     pub fn address(&self, bus: u8, device: u8, function: u8) -> Result<u64, Error> {
-        if bus > self.end_bus {
+        if bus < self.start_bus || bus > self.end_bus {
             return Err(Error::BusOutOfRange);
         }
-        let bus = bus
-            .checked_sub(self.start_bus)
-            .ok_or(Error::BusOutOfRange)?;
         if device > 31 {
             return Err(Error::DeviceOutOfRange);
         }

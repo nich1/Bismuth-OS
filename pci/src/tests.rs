@@ -318,20 +318,44 @@ const SEGMENT: Allocation = Allocation {
     end_bus: 0x1F,
 };
 
+/// Buses 0x40 to 0x7F of a segment whose bus 0 would be at 0xE0000000.
+const LATER: Allocation = Allocation {
+    base: 0xE000_0000,
+    segment: 1,
+    start_bus: 0x40,
+    end_bus: 0x7F,
+};
+
 #[test]
 fn computes_a_function_s_configuration_address() {
-    // base + ((bus - start bus) << 20 | device << 15 | function << 12).
-    assert_eq!(SEGMENT.address(0x10, 0, 0), Ok(0x1_0000_0000));
-    assert_eq!(SEGMENT.address(0x11, 0, 0), Ok(0x1_0010_0000));
-    assert_eq!(SEGMENT.address(0x10, 1, 0), Ok(0x1_0000_8000));
-    assert_eq!(SEGMENT.address(0x10, 0, 1), Ok(0x1_0000_1000));
-    assert_eq!(SEGMENT.address(0x1F, 31, 7), Ok(0x1_00FF_F000));
+    // base + (bus << 20 | device << 15 | function << 12): the base is where
+    // bus 0 would be, whatever the start bus. Worked by hand:
+    //   SEGMENT, 10:00.0: 0x1_0000_0000 + 0x0100_0000 = 0x1_0100_0000
+    //   SEGMENT, 11:00.0: 0x1_0000_0000 + 0x0110_0000 = 0x1_0110_0000
+    //   SEGMENT, 10:01.0: 0x0100_0000 | 0x8000 -> 0x1_0100_8000
+    //   SEGMENT, 10:00.1: 0x0100_0000 | 0x1000 -> 0x1_0100_1000
+    //   SEGMENT, 1f:1f.7: 0x01F0_0000 | 0xF_8000 | 0x7000 = 0x01FF_F000
+    //     -> 0x1_01FF_F000
+    //   LATER, 40:00.0: 0xE000_0000 + 0x0400_0000 = 0xE400_0000
+    //   LATER, 7f:1f.7: 0xE000_0000 + 0x07FF_F000 = 0xE7FF_F000
+    //   whole, 00:00.0: 0xE000_0000
+    //   whole, 01:02.3: 0x10_0000 | 0x1_0000 | 0x3000 -> 0xE011_3000
+    //   whole, ff:1f.7: 0xE000_0000 + 0x0FFF_F000 = 0xEFFF_F000
+    assert_eq!(SEGMENT.address(0x10, 0, 0), Ok(0x1_0100_0000));
+    assert_eq!(SEGMENT.address(0x11, 0, 0), Ok(0x1_0110_0000));
+    assert_eq!(SEGMENT.address(0x10, 1, 0), Ok(0x1_0100_8000));
+    assert_eq!(SEGMENT.address(0x10, 0, 1), Ok(0x1_0100_1000));
+    assert_eq!(SEGMENT.address(0x1F, 31, 7), Ok(0x1_01FF_F000));
+    assert_eq!(LATER.address(0x40, 0, 0), Ok(0xE400_0000));
+    assert_eq!(LATER.address(0x7F, 31, 7), Ok(0xE7FF_F000));
     let whole = Allocation {
         base: 0xE000_0000,
         segment: 0,
         start_bus: 0,
         end_bus: 0xFF,
     };
+    assert_eq!(whole.address(0, 0, 0), Ok(0xE000_0000));
+    assert_eq!(whole.address(1, 2, 3), Ok(0xE011_3000));
     assert_eq!(whole.address(0xFF, 31, 7), Ok(0xEFFF_F000));
 }
 
@@ -340,6 +364,9 @@ fn refuses_a_bus_outside_the_allocation() {
     assert_eq!(SEGMENT.address(0x0F, 0, 0), Err(Error::BusOutOfRange));
     assert_eq!(SEGMENT.address(0x20, 0, 0), Err(Error::BusOutOfRange));
     assert_eq!(SEGMENT.address(0, 0, 0), Err(Error::BusOutOfRange));
+    assert_eq!(LATER.address(0x3F, 0, 0), Err(Error::BusOutOfRange));
+    assert_eq!(LATER.address(0x80, 0, 0), Err(Error::BusOutOfRange));
+    assert_eq!(LATER.address(0, 0, 0), Err(Error::BusOutOfRange));
     // An allocation whose end comes before its start holds no bus.
     let reversed = Allocation {
         start_bus: 5,
@@ -360,16 +387,28 @@ fn refuses_a_device_or_function_out_of_range() {
         SEGMENT.address(0x10, 0, 0xFF),
         Err(Error::FunctionOutOfRange)
     );
+    assert_eq!(LATER.address(0x40, 32, 0), Err(Error::DeviceOutOfRange));
+    assert_eq!(LATER.address(0x40, 0, 8), Err(Error::FunctionOutOfRange));
 }
 
 #[test]
 fn refuses_an_address_that_overflows() {
+    // Buses 0xF0 to 0xFF, bus 0 at 0xFFFF_FFFF_F010_0000. Worked by hand:
+    //   fe:1f.7: offset 0x0FE0_0000 | 0xF_8000 | 0x7000 = 0x0FEF_F000, and
+    //     0xF010_0000 + 0x0FEF_F000 = 0xFFFF_F000: 0xFFFF_FFFF_FFFF_F000,
+    //     the last block below 2^64.
+    //   ff:00.0: offset 0x0FF0_0000, and 0xF010_0000 + 0x0FF0_0000 =
+    //     0x1_0000_0000: past 2^64.
+    // Counting from the start bus would give offsets of only 0x00EF_F000
+    // and 0x00F0_0000, which fit.
     let high = Allocation {
-        base: 0xFFFF_FFFF_FFF0_0000,
-        ..SEGMENT
+        base: 0xFFFF_FFFF_F010_0000,
+        segment: 0,
+        start_bus: 0xF0,
+        end_bus: 0xFF,
     };
-    assert_eq!(high.address(0x10, 31, 7), Ok(0xFFFF_FFFF_FFFF_F000));
-    assert_eq!(high.address(0x11, 0, 0), Err(Error::AddressOverflow));
+    assert_eq!(high.address(0xFE, 31, 7), Ok(0xFFFF_FFFF_FFFF_F000));
+    assert_eq!(high.address(0xFF, 0, 0), Err(Error::AddressOverflow));
 }
 
 // ---- The header ----
@@ -1356,9 +1395,11 @@ fn damage_many_times() -> (usize, usize, usize) {
             random.below(40) as u8,
             random.below(10) as u8,
         );
+        // An address returned is bus 0's base plus the bus, device and
+        // function in their bit fields, whatever the start bus.
         if let Ok(address) = allocation.address(bus, device, function) {
-            assert!(address >= allocation.base);
-            assert_eq!((address - allocation.base) % 4096, 0);
+            let offset = u64::from(bus) << 20 | u64::from(device) << 15 | u64::from(function) << 12;
+            assert_eq!(address.checked_sub(allocation.base), Some(offset));
             assert!(device < 32 && function < 8);
             assert!(allocation.start_bus <= bus && bus <= allocation.end_bus);
         }
