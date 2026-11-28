@@ -65,8 +65,11 @@ pub unsafe fn load_code_segment(selector: u16) {
 /// is the current one, in the loaded segment table.
 pub unsafe fn load_data_segments(data: u16) {
     // SAFETY: the caller vouches for `data`, and the null selector needs no
-    // descriptor. The stack pointer is unchanged, and in 64-bit mode the
-    // segments' bases and limits are not used for these registers.
+    // descriptor. The stack pointer is unchanged. In 64-bit mode the bases
+    // and limits of DS, ES and SS are not used. The bases of FS and GS are
+    // used, and a null load clears them on Intel but may keep the
+    // firmware's on older AMD processors; nothing in the kernel reads
+    // through FS or GS, so either is sound.
     unsafe {
         asm!(
             "mov ds, {data:x}",

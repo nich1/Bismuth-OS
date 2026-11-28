@@ -76,10 +76,12 @@ needs what the one before it set up:
    selector and the address of the next instruction and "returns" to them
    with `retfq`.
 4. **The data registers.** DS, ES and SS get the kernel's data selector.
-   FS and GS get the null selector: in 64-bit mode their bases come from
-   model-specific registers, not from the segment table, and nothing in the
-   kernel uses them yet; null says so, and no register is left naming an
-   entry of the firmware's table.
+   FS and GS get the null selector: nothing in the kernel uses them yet,
+   null says so, and no register is left naming an entry of the
+   firmware's table. Their bases are the one part of segmentation still
+   used in 64-bit mode; a kernel that wants them sets them through
+   model-specific registers, and must not count on a null load to clear
+   them, since older AMD processors keep the old base.
 5. **`ltr`** loads the task register from the TSS descriptor, which must be
    in the segment table just loaded. The processor marks that descriptor
    busy, a write, which is why the segment table is in writable memory.
@@ -172,8 +174,9 @@ handler returns yet, so the stubs save no other registers and nothing runs
 
 A gate without an interrupt stack runs its handler on the stack in use.
 That is no good when the stack itself is the problem. When the kernel's
-stack runs down into its guard page, the push that touches the guard page
-raises a page fault; but delivering the page fault means pushing its frame
+stack runs down into its guard page, the first write that touches the
+guard page raises a page fault; but delivering the page fault means
+pushing its frame
 onto the same, overflowed stack, which faults again. A fault while
 delivering a page fault is a *double fault*. If the double fault were also
 delivered on that stack, it would fault a third time, and a third fault
@@ -252,10 +255,10 @@ The tables' layouts are the library's (`descriptors/src/lib.rs`, which cites
 its sources); the kernel works none of them out itself. The instructions
 are in the Intel 64 and IA-32 Architectures Software Developer's Manual:
 volume 2A, "LGDT/LIDT—Load Global/Interrupt Descriptor Table Register",
-"LTR—Load Task Register" and "LEA—Load Effective Address"; volume 2B,
-"MOV—Move", "MOV—Move to/from Control Registers", "RET—Return From
-Procedure", "STR—Store Task Register" and the entries for `PUSH`, `DIV`,
-`UD2` and `INT n`. The frame, error codes and interrupt stacks are volume
+"LTR—Load Task Register", "LEA—Load Effective Address" and the entries
+for `DIV` and `INT n`; volume 2B, "MOV—Move", "MOV—Move to/from Control
+Registers", "RET—Return From Procedure", "STR—Store Task Register" and
+the entries for `PUSH` and `UD2`. The frame, error codes and interrupt stacks are volume
 3A, chapter "Interrupt and Exception Handling", sections "64-Bit Mode
 Stack Frame", "Error Code", "Interrupt Stack Table" and "Exception and
 Interrupt Reference" (its entries for the double fault and the page fault
