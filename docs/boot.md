@@ -547,7 +547,7 @@ usable memory the kernel reports is tied to what QEMU was given.
 | The entry point moved to the start of the read-only segment | `BISMUTH KERNEL PLACE ERROR: entry point not in an executable segment` | 35 |
 | The last segment moved onto the last page of the address range | `BISMUTH KERNEL PLACE ERROR: segment ... uses the last page of the address range`, naming the last segment | 35 |
 | The real kernel file, on a processor without no-execute pages (QEMU's `-cpu qemu64,-nx`) | The `FILE OK` and `COPIED` lines, then `BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute` | 35 |
-| The kernel file built to panic on entry | Started, then `BISMUTH KERNEL PANIC`, and never `BISMUTH KERNEL OK` | 67 |
+| The kernel file built to panic once it has read the hand-off | Started, then `BISMUTH KERNEL PANIC`, and never `BISMUTH KERNEL OK` | 67 |
 | The real kernel file, started by the boot stage built to damage the hand-off structure's marker | Started up to the `JUMP` line, then `BISMUTH KERNEL HANDOFF ERROR: the marker is wrong`, and never `BISMUTH KERNEL OK` | 67 |
 
 The `qemu-exit` and `damage-handoff` features are off in normal builds. On a real PC nothing
