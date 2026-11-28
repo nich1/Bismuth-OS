@@ -6,7 +6,9 @@
 //! xtask` runs the tests at the bottom.
 
 use bismuth_elf::Error as ElfError;
-use bismuth_elf::place::{Error as PlaceError, KERNEL_BASE, MAX_SEGMENTS, PAGE_LIMIT};
+use bismuth_elf::place::{
+    Error as PlaceError, KERNEL_BASE, MAX_SEGMENTS, PAGE_LIMIT, STACK_BOTTOM,
+};
 use bismuth_paging::{Error as PagingError, Permissions};
 
 /// A step of reading the kernel file that goes through the firmware.
@@ -142,6 +144,33 @@ pub enum MapFailure {
         copied: u64,
         /// The sum read through the kernel addresses.
         read: u64,
+    },
+    /// The firmware refused pages for the kernel's stack, with this status,
+    /// or has no page allocation service.
+    NoStack {
+        /// The firmware's error status, if it returned one.
+        status: Option<usize>,
+    },
+    /// The table builder refused to map the stack.
+    StackMap {
+        /// What the builder returned.
+        error: PagingError,
+    },
+    /// Walking the tables in use found a page of the stack not mapped, or
+    /// mapped to another frame or with other permissions than read and
+    /// write.
+    StackWalk {
+        /// The page's kernel address.
+        address: u64,
+        /// The frame and permissions found, if the page is mapped.
+        found: Option<(u64, Permissions)>,
+        /// The frame it should lead to.
+        expected: u64,
+    },
+    /// The guard page below the stack is mapped.
+    GuardMapped {
+        /// The guard page's address.
+        address: u64,
     },
 }
 
@@ -335,15 +364,7 @@ pub fn map_error_line(failure: &MapFailure) -> Line {
                 .push(" at ")
                 .push_hex(address)
                 .push(": ");
-            match error {
-                PagingError::Unaligned => line.push("Unaligned"),
-                PagingError::Empty => line.push("Empty"),
-                PagingError::NonCanonical => line.push("NonCanonical"),
-                PagingError::PhysicalTooLarge => line.push("PhysicalTooLarge"),
-                PagingError::AlreadyMapped(at) => line.push("AlreadyMapped at ").push_hex(at),
-                PagingError::LargePage(at) => line.push("LargePage at ").push_hex(at),
-                PagingError::OutOfFrames => line.push("OutOfFrames"),
-            };
+            push_paging_error(&mut line, error);
         }
         MapFailure::Walk {
             segment,
@@ -356,14 +377,7 @@ pub fn map_error_line(failure: &MapFailure) -> Line {
                 .push(" page ")
                 .push_hex(address)
                 .push(" is ");
-            match found {
-                Some((frame, permissions)) => line
-                    .push("at ")
-                    .push_hex(frame)
-                    .push(" ")
-                    .push(permissions_text(permissions)),
-                None => line.push("not mapped"),
-            };
+            push_found(&mut line, found);
             line.push(", expected ")
                 .push_hex(expected.0)
                 .push(" ")
@@ -380,7 +394,67 @@ pub fn map_error_line(failure: &MapFailure) -> Line {
                 .push(" differs from the copied sum ")
                 .push_hex(copied);
         }
+        MapFailure::NoStack { status } => {
+            line.push("no pages for the stack: ");
+            match status {
+                Some(status) => line.push("status ").push_hex(status as u64),
+                None => line.push("no interface"),
+            };
+        }
+        MapFailure::StackMap { error } => {
+            line.push("could not map the stack at ")
+                .push_hex(STACK_BOTTOM)
+                .push(": ");
+            push_paging_error(&mut line, error);
+        }
+        MapFailure::StackWalk {
+            address,
+            found,
+            expected,
+        } => {
+            line.push("stack page ").push_hex(address).push(" is ");
+            push_found(&mut line, found);
+            line.push(", expected ").push_hex(expected).push(" rw-");
+        }
+        MapFailure::GuardMapped { address } => {
+            line.push("the guard page ")
+                .push_hex(address)
+                .push(" below the stack is mapped");
+        }
     }
+    line
+}
+
+/// The table builder's error by its name in `bismuth-paging`.
+fn push_paging_error(line: &mut Line, error: PagingError) {
+    match error {
+        PagingError::Unaligned => line.push("Unaligned"),
+        PagingError::Empty => line.push("Empty"),
+        PagingError::NonCanonical => line.push("NonCanonical"),
+        PagingError::PhysicalTooLarge => line.push("PhysicalTooLarge"),
+        PagingError::AlreadyMapped(at) => line.push("AlreadyMapped at ").push_hex(at),
+        PagingError::LargePage(at) => line.push("LargePage at ").push_hex(at),
+        PagingError::OutOfFrames => line.push("OutOfFrames"),
+    };
+}
+
+/// `at <frame> <permissions>`, or `not mapped`.
+fn push_found(line: &mut Line, found: Option<(u64, Permissions)>) {
+    match found {
+        Some((frame, permissions)) => line
+            .push("at ")
+            .push_hex(frame)
+            .push(" ")
+            .push(permissions_text(permissions)),
+        None => line.push("not mapped"),
+    };
+}
+
+/// `BISMUTH KERNEL JUMP entry=0x<hex> stack=0x<hex>`: where the boot stage
+/// is about to jump, and the top of the stack the kernel starts on.
+pub fn jump_line(entry: u64, stack_top: u64) -> Line {
+    let mut line = Line::new("BISMUTH KERNEL JUMP entry=");
+    line.push_hex(entry).push(" stack=").push_hex(stack_top);
     line
 }
 
@@ -795,6 +869,45 @@ mod tests {
                 },
                 "sum read at the kernel addresses 0x34 differs from the copied sum 0x12",
             ),
+            (
+                MapFailure::NoStack {
+                    status: Some(0x8000_0000_0000_0009),
+                },
+                "no pages for the stack: status 0x8000000000000009",
+            ),
+            (
+                MapFailure::NoStack { status: None },
+                "no pages for the stack: no interface",
+            ),
+            (
+                MapFailure::StackMap {
+                    error: PagingError::AlreadyMapped(STACK_BOTTOM),
+                },
+                "could not map the stack at 0xffffffff7fff0000: \
+                 AlreadyMapped at 0xffffffff7fff0000",
+            ),
+            (
+                MapFailure::StackWalk {
+                    address: STACK_BOTTOM,
+                    found: None,
+                    expected: 0x9000,
+                },
+                "stack page 0xffffffff7fff0000 is not mapped, expected 0x9000 rw-",
+            ),
+            (
+                MapFailure::StackWalk {
+                    address: STACK_BOTTOM + 0x1000,
+                    found: Some((0xa000, READ)),
+                    expected: 0xa000,
+                },
+                "stack page 0xffffffff7fff1000 is at 0xa000 r--, expected 0xa000 rw-",
+            ),
+            (
+                MapFailure::GuardMapped {
+                    address: STACK_BOTTOM - 0x1000,
+                },
+                "the guard page 0xffffffff7ffef000 below the stack is mapped",
+            ),
         ];
         for (failure, reason) in cases {
             assert_eq!(
@@ -824,6 +937,16 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), 7);
+    }
+
+    #[test]
+    fn the_jump_line_has_the_documented_shape() {
+        assert_eq!(
+            jump_line(0xffff_ffff_8000_1190, 0xffff_ffff_8000_0000).as_str(),
+            "BISMUTH KERNEL JUMP entry=0xffffffff80001190 stack=0xffffffff80000000"
+        );
+        let longest = jump_line(u64::MAX, u64::MAX);
+        assert!(longest.as_str().len() < Line::CAPACITY);
     }
 
     #[test]

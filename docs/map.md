@@ -9,21 +9,23 @@ something.
 
 | Part | Where | What it does | How to exercise it |
 |---|---|---|---|
-| Boot stage | `boot/src/main.rs` | The program the firmware loads. Prints one line on the serial port and one on the screen, reads the kernel file and checks it with the ELF reader, copies its segments into pages from the firmware, gives them their kernel addresses, prints each result on the serial port, then halts | `cargo xtask test` |
+| Boot stage | `boot/src/main.rs` | The program the firmware loads. Prints one line on the serial port and one on the screen, reads the kernel file and checks it with the ELF reader, copies its segments into pages from the firmware, gives them their kernel addresses and a stack, prints each result on the serial port, then jumps to the kernel; on a failure it halts instead | `cargo xtask test` |
 | Kernel copy | `boot/src/load.rs` | Copies each loadable segment of the kernel into cleared pages of its own and records, per segment, the physical and kernel address of its pages, their count and permissions; sums the copied pages | `cargo xtask test` checks the sum against one computed on the host |
-| Kernel addresses | `boot/src/map.rs` | Builds new address tables from a copy of the firmware's top-level table plus each kernel segment at its kernel address with its own permissions, switches to them, then walks the tables in use and reads the kernel back through its kernel addresses | `cargo xtask test` checks the `PLACED` line against the file |
+| Kernel addresses | `boot/src/map.rs` | Builds new address tables from a copy of the firmware's top-level table plus each kernel segment at its kernel address with its own permissions and the kernel's stack below them, switches to them, then walks the tables in use, reads the kernel back through its kernel addresses, and checks the stack's pages and that its guard page is missing | `cargo xtask test` checks the `PLACED` line against the file |
 | Table memory | `boot/src/memory.rs` | The frames the new tables live in, taken from the firmware in one block, the read of the firmware's top-level table, and the read-back at kernel addresses: the `unsafe` part of the table work | `cargo xtask test` |
-| Processor registers | `boot/src/cpu.rs` | Reads CR0, CR3, CR4 and `IA32_EFER`; writes CR3 and `IA32_EFER`; asks `CPUID` whether pages can be marked no-execute | `cargo xtask test` |
+| Processor registers | `boot/src/cpu.rs` | Reads CR0, CR3, CR4 and `IA32_EFER`; writes CR3 and `IA32_EFER`; asks `CPUID` whether pages can be marked no-execute; jumps to the kernel on its own stack with interrupts off | `cargo xtask test` |
 | Kernel file report | `boot/src/report.rs` | The lines the boot stage prints about the kernel file and its copy, and the reason for each failure, built without allocation | `cargo xtask check` runs its unit tests through `xtask` |
 | Serial output | `boot/src/serial.rs` | Sets up the first serial port and writes text to it | `cargo xtask test` reads what it prints |
 | Firmware interface | `boot/src/uefi.rs` | The few UEFI structures the boot stage uses, and the firmware text console | `cargo xtask run` shows the console line |
 | Boot services | `boot/src/uefi/boot_services.rs` | Memory and page allocation and protocol lookup through the firmware | `cargo xtask test` |
 | Firmware file reading | `boot/src/uefi/file.rs` | Reads a whole file from the disk the boot stage was loaded from | `cargo xtask test` boots disks with a good, missing, empty and damaged kernel file |
 | Port access | `boot/src/port.rs` | Reads and writes x86 I/O ports | Used by serial output |
-| Kernel | `kernel/src/main.rs` | A separate program, built as an ELF file for the `x86_64-unknown-none` target. Its entry point only stops the processor. The boot stage reads, checks and copies its file and maps it at its address, but does not start it yet | `cargo xtask check` reads its file |
-| Processor instructions | `kernel/src/cpu.rs` | The kernel's only `unsafe` code: the halt loop | Used by the kernel |
+| Kernel | `kernel/src/main.rs` | A separate program, built as an ELF file for the `x86_64-unknown-none` target. The boot stage reads, checks and copies its file, maps it at its address with a stack, and jumps to its entry point, which prints `BISMUTH KERNEL OK` on the serial port and stops; its panic handler prints `BISMUTH KERNEL PANIC`. With `qemu-exit` it then exits QEMU (65, or 67 on a panic); `panic-at-entry` makes it panic at once, for the boot test | `cargo xtask test` boots it; `cargo xtask check` reads its file |
+| Processor instructions | `kernel/src/cpu.rs` | The halt loop | Used by the kernel |
+| Kernel port access | `kernel/src/port.rs` | Reads and writes x86 I/O ports, and with `qemu-exit` makes QEMU exit | Used by the kernel's serial output |
+| Kernel serial output | `kernel/src/serial.rs` | Sets up the first serial port again and writes text to it | `cargo xtask test` reads what it prints |
 | ELF reader | `elf/src/lib.rs` | Safe, allocation-free library that checks an ELF file and reports its entry point and loadable segments, or an error. The boot stage uses it on the kernel file | `cargo xtask check` runs its unit tests (`elf/src/tests.rs`) and runs it on the kernel file |
-| Placement rules | `elf/src/place.rs` | Part of the ELF reader. The one copy of the rules for placing the kernel at the addresses it is linked for (fixed-address executable, at or above `0xFFFF_FFFF_8000_0000`, no shared pages, at most 16384 pages and 8 segments, not on the last page of the address range, entry point in an executable segment), the pages each segment takes, and the FNV-1a checksum. Used by the boot stage and by `cargo xtask check` | `cargo xtask check` runs its unit tests (`elf/src/place/tests.rs`) |
+| Placement rules | `elf/src/place.rs` | Part of the ELF reader. The one copy of the rules for placing the kernel at the addresses it is linked for (fixed-address executable, at or above `0xFFFF_FFFF_8000_0000`, no shared pages, at most 16384 pages and 8 segments, not on the last page of the address range, entry point in an executable segment), the pages each segment takes, the FNV-1a checksum, and where the kernel's stack and its guard page go (just below the lowest address a segment may use). Used by the boot stage and by `cargo xtask check` | `cargo xtask check` runs its unit tests (`elf/src/place/tests.rs`) |
 | Address table builder | `paging/src/lib.rs` | Safe, allocation-free library that builds x86-64 4-level address tables (page tables): maps a range of virtual addresses to physical ones with 4 KiB pages and read, write and execute permissions, in memory the caller lends it, and looks an address up the way the processor does. The boot stage uses it to put the kernel at its address and to check the result | `cargo xtask check` runs its unit tests (`paging/src/tests.rs`) |
 
 ## The boot disk
@@ -34,11 +36,11 @@ written without code marks because they exist only after a build:
 | File | What it is |
 |---|---|
 | EFI/BOOT/BOOTX64.EFI | The boot stage, which the firmware runs |
-| EFI/BISMUTH/KERNEL.ELF | The kernel. The boot stage reads, checks and copies it into memory and maps it at its address, but does not start it yet |
+| EFI/BISMUTH/KERNEL.ELF | The kernel. The boot stage reads, checks and copies it into memory, maps it at its address and starts it |
 
 `cargo xtask test` also lays out one disk per boot scenario under
 target/boot-scenarios, each with the boot stage and its own kernel file, or
-none.
+none. One of those kernel files is built to panic on entry.
 
 ## Building and checking
 

@@ -8,3 +8,11 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Ask QEMU to exit once the kernel has printed its line, or panicked. Only
+# the automated boot test turns this on; it must stay off for real hardware.
+qemu-exit = []
+# Panic as soon as the kernel starts, so the boot test can check the panic
+# handler. Only the boot test turns this on, for a second kernel file.
+panic-at-entry = []

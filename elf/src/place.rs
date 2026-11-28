@@ -25,6 +25,34 @@ const LAST_PAGE: u64 = !IN_PAGE;
 /// largest kernel file the boot stage reads. A kernel needs far less, and a
 /// damaged memory size must not ask the firmware for most of the machine.
 pub const PAGE_LIMIT: u64 = 16 * 1024;
+/// The top of the kernel's stack, which the boot stage maps and the kernel
+/// starts on: [`KERNEL_BASE`] itself, so the stack and its guard page lie
+/// just below the lowest address a segment may use. The rule that no
+/// segment starts below [`KERNEL_BASE`] ([`Error::BelowBase`]), and that
+/// none runs past the top of the address range ([`Error::PastTheTop`]),
+/// keeps every segment out of them. It is a 2 MiB boundary, and the stack
+/// and its guard page lie in the 2 MiB below it, which no segment shares,
+/// so mapping the stack takes exactly one directory and one last-level
+/// table of its own.
+pub const STACK_TOP: u64 = KERNEL_BASE;
+/// How many 4 KiB pages the stack has: 64 KiB, plenty for a kernel that
+/// does not yet recurse or keep large values on the stack, even unoptimised.
+pub const STACK_PAGES: u64 = 16;
+/// The lowest address of the stack: [`STACK_TOP`] less [`STACK_PAGES`]
+/// pages.
+pub const STACK_BOTTOM: u64 = 0xFFFF_FFFF_7FFF_0000;
+/// The page just below the stack, which is left unmapped, so that running
+/// off the bottom of the stack faults instead of writing other memory.
+pub const STACK_GUARD: u64 = 0xFFFF_FFFF_7FFE_F000;
+
+// The stack must stay below every segment, so a change to the constants
+// that breaks that does not build.
+const _: () = assert!(STACK_TOP <= KERNEL_BASE);
+const _: () = assert!(STACK_BOTTOM == STACK_TOP - STACK_PAGES * PAGE_SIZE);
+const _: () = assert!(STACK_GUARD == STACK_BOTTOM - PAGE_SIZE);
+// One 2 MiB region holds the stack and its guard page.
+const _: () = assert!(STACK_GUARD >> 21 == (STACK_TOP - 1) >> 21);
+
 /// The most loadable segments with memory a placement holds. The kernel has
 /// one per kind of permission (read, read and execute, read and write), so
 /// eight leaves room without making the table large.

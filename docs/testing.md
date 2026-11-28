@@ -32,15 +32,17 @@ expected code within two minutes:
 
 | Scenario | Kernel file on the disk | Expected line | Exit code |
 |---|---|---|---|
-| normal | The real kernel | `BISMUTH KERNEL FILE OK entry=0x<hex> segments=<n> bytes=<n>`, with the values the ELF reader finds in the same file on the development machine | 33 |
+| normal | The real kernel | `BISMUTH KERNEL FILE OK entry=0x<hex> segments=<n> bytes=<n>`, with the values the ELF reader finds in the same file on the development machine, and in the end the kernel's own `BISMUTH KERNEL OK` | 65 |
 | missing | None | `BISMUTH KERNEL FILE ERROR: file not found` | 35 |
 | empty | Zero bytes | `BISMUTH KERNEL FILE ERROR: file is empty` | 35 |
 | bad-signature | The real kernel with its second byte changed | `BISMUTH KERNEL FILE ERROR: ELF reader: BadSignature` | 35 |
 | truncated | The real kernel cut in the middle of its last program header | `BISMUTH KERNEL FILE ERROR: ELF reader: ProgramHeadersOutsideFile` | 35 |
 
-Exit code 33 means the boot stage read and checked the kernel file; 35 means
-it reported a failure. Both come from the `isa-debug-exit` device, so a
-failing scenario ends in seconds instead of waiting for the time limit. All
+Exit code 65 means the kernel ran and printed its line, 67 that it
+panicked; 35 means the boot stage reported a failure. All come from the
+`isa-debug-exit` device, so a failing scenario ends in seconds instead of
+waiting for the time limit. The full list of scenarios is in
+`docs/boot.md`, "How it is tested". All
 scenarios run even when one fails, and each prints its name, time and lines.
 
 ## Rules

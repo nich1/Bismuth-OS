@@ -51,10 +51,11 @@ The boot stage then does six things:
    sum is a 64-bit FNV-1a checksum of every byte of those pages. A broken
    rule, or the firmware refusing pages, gets a line starting `BISMUTH
    KERNEL PLACE ERROR:` instead.
-5. **Gives the kernel its addresses.** It builds new address tables that
-   keep everything the firmware had and add each segment at its kernel
-   address, with its own permissions, and switches the processor to them
-   (see "Address tables" below). Then it checks the tables in use, reads
+5. **Gives the kernel its addresses and a stack.** It builds new address
+   tables that keep everything the firmware had and add each segment at
+   its kernel address, with its own permissions, and the kernel's stack
+   below them (see "How the kernel is entered" below), and switches the
+   processor to them (see "Address tables" below). Then it checks the tables in use, reads
    every byte of the kernel back through its kernel addresses, and writes
    `BISMUTH KERNEL PLACED segments=2 pages=2 sum=0x108120a9f6b1b5b1
    perms=r--,r-x wp=1`: the sum must be the same as in the `COPIED` line,
@@ -68,19 +69,69 @@ The boot stage then does six things:
    Anything that goes wrong gets a line starting `BISMUTH KERNEL MAP
    ERROR:` instead: 5-level paging is on, the processor cannot mark pages
    no-execute or did not turn that on, the top-level entry the kernel
-   goes under is already used, the firmware has no memory for the tables,
-   the table builder refuses a segment, a page is missing or has the
-   wrong frame or permissions, or the bytes read back differ.
-6. **Stops.** It puts the processor to sleep in a loop.
+   goes under is already used, the firmware has no memory for the tables
+   or the stack, the table builder refuses a segment or the stack, a page
+   of a segment or of the stack is missing or has the wrong frame or
+   permissions, the guard page below the stack is mapped, or the bytes
+   read back differ.
+6. **Jumps to the kernel.** It writes `BISMUTH KERNEL JUMP
+   entry=0xffffffff800013a0 stack=0xffffffff80000000` on the serial port
+   (the entry point is an example; the stack's top is fixed), then turns
+   interrupts off, moves to the kernel's stack and jumps to the entry
+   point. The kernel prints `BISMUTH KERNEL OK` on the serial port and
+   stops.
 
-Each failure gets its own line, and then the boot stage stops, because it is
-the only thing running. There is no screen to rely on and nobody to report to,
-so a clear message on the serial port is the only way to learn what went
-wrong.
+Each failure gets its own line, and then the boot stage stops, putting the
+processor to sleep in a loop, because it is the only thing running. There
+is no screen to rely on and nobody to report to, so a clear message on the
+serial port is the only way to learn what went wrong.
 
 The boot stage does not yet collect what the kernel needs to know about
-the machine (above all, the map of usable memory), tell the firmware to step
-aside, or jump into the kernel. Those come next.
+the machine (above all, the map of usable memory), pass it to the kernel,
+or tell the firmware to step aside. Those come next.
+
+### How the kernel is entered
+
+The kernel's entry point is entered by a jump, never a call, in this
+state:
+
+- **Address tables.** The tables the boot stage built (see "Address
+  tables" below). Each kernel segment is at its linked address with its
+  own permissions. The stack is 16 pages (64 KiB) at
+  `0xFFFF_FFFF_7FFF_0000` up to `0xFFFF_FFFF_8000_0000`, read and write,
+  not executable, cleared; the page below it, at `0xFFFF_FFFF_7FFE_F000`,
+  is not mapped, so running off the stack faults instead of overwriting
+  other memory. The firmware's mappings are all still there in the lower
+  half, this program's among them, but the kernel must not rely on them:
+  they go once the kernel has its own tables.
+- **Stack pointer:** `0xFFFF_FFFF_7FFF_FFF8`, eight below the top. On entry
+  to a function, System V x86-64 code expects the stack pointer plus 8 to
+  be a multiple of 16, as it is just after a `call` has pushed a return
+  address. The kernel's entry is an ordinary `extern "sysv64"` function,
+  so it is given exactly that, and needs no stub of its own to set up the
+  stack. The eight bytes at the stack pointer, where a return address
+  would be, are zero; the entry function never returns.
+- **Flags:** interrupts are off (`IF` clear) and the direction flag is
+  clear. Nothing turns interrupts back on.
+- **Other registers:** undefined. Only the stack pointer, the instruction
+  pointer and the two flags above are given values. Nothing is passed to
+  the kernel yet.
+- **The firmware:** boot services are still running, because nothing has
+  told the firmware to step aside yet, but the kernel must not call them,
+  and the boot stage does not after the jump.
+- **The serial port:** set to 115200 baud, 8 data bits, no parity, one
+  stop bit by the boot stage, and written to by it and by the firmware.
+  The kernel does not rely on that: it waits for the port to finish
+  sending the boot stage's last bytes, then sets it up again the same way
+  itself.
+
+The stack cannot meet a kernel segment: its top is the lowest address a
+segment may start at, the placement rules refuse a segment below it or
+one that runs past the top of the address range, and
+`elf/src/place.rs` fails to build if the stack's constants are moved
+above it. The stack and its guard page lie in the 2 MiB below the
+kernel's 2 GiB, which no segment shares, so they need one directory and
+one last-level table of their own.
 
 ### Address tables
 
@@ -123,18 +174,21 @@ that feature on if the firmware has not, because the library marks pages
 that may not run code with a bit the processor otherwise treats as an
 error. The memory for
 the tables comes from the firmware in one block, enough for any kernel the
-placement rules accept; today's kernel needs four tables.
+placement rules accept and the stack: 54 frames, of which today's kernel
+and its stack need six.
 
 **What the `PLACED` line proves.** Each page of each segment is looked up
 in the tables the processor is using (the address read back from CR3, so
 a missing switch shows), by code separate from the code that built them,
 and must lead to that segment's own frame with that segment's permissions.
 Then every byte is read through the kernel addresses, so through the
-processor's own lookup, and the sum must match the copy. And the firmware
-still prints on its console afterwards. **What it does not prove.** Nothing
-runs at the kernel addresses yet, so it does not show that code there can
-run, or that read-only pages refuse writes: the firmware decides the
-latter for now (`wp=1` means it does). It does not show the kernel is
+processor's own lookup, and the sum must match the copy. Each page of the
+stack is looked up the same way and must lead to its own frame, read and
+write, and the guard page below it must not be mapped. And the firmware
+still prints on its console afterwards. That code at the kernel addresses
+can run, on that stack, is shown next, by the kernel's own line.
+**What it does not prove.** It does not show that read-only pages refuse
+writes: the firmware decides that for now (`wp=1` means it does). It does not show the kernel is
 ready to start: the firmware still owns the machine, and the tables still
 hold all of its mappings, which the kernel will replace with its own. And
 it looks only at the kernel's own pages, so it does not show that nothing
@@ -171,7 +225,9 @@ nothing underneath it, no firmware and no operating system, so it is built for
 a different Rust target, `x86_64-unknown-none` (x86-64, no operating system).
 That target produces an ELF file. `cargo xtask build` copies it onto the boot
 disk at `target/esp/EFI/BISMUTH/KERNEL.ELF`, next to the boot stage. Today the
-kernel's entry function does one thing: it stops the processor in a loop.
+kernel's entry function sets up the serial port, writes `BISMUTH KERNEL OK`
+to it, and stops the processor in a loop. If the kernel panics, it writes
+`BISMUTH KERNEL PANIC` instead and stops.
 
 **ELF** is the standard executable format on Linux and most other Unix-like
 systems. A file starts with a *header* that says what kind of file it is, which
@@ -186,8 +242,8 @@ address range: its first byte goes at `0xFFFF_FFFF_8000_0000`. Its ELF file
 is a *fixed-address executable*, so loading it needs no fixing up of
 addresses. The settings that do this are in `.cargo/config.toml`. The kernel
 has one loadable segment per kind of permission: one read-only, one read and
-execute (the code), and one read and write once the kernel has data it
-changes (today it has none, so there are two). Each segment starts on a page
+execute (the code), and one read and write for data it changes (today
+only eight bytes, brought in by the Rust core library). Each segment starts on a page
 of its own, so each can be given its own permissions.
 
 **The reader** is the `elf` library (`bismuth-elf`). Given the bytes of a
@@ -226,25 +282,43 @@ Tests cover this in three ways:
 
 QEMU is a program that imitates a whole PC. `cargo xtask test` uses it:
 
-1. It builds the boot stage and the kernel, and copies the boot stage to
-   `target/esp/EFI/BOOT/BOOTX64.EFI`.
+1. It builds the boot stage and the kernel, both with their `qemu-exit`
+   features, and copies the boot stage to
+   `target/esp/EFI/BOOT/BOOTX64.EFI`. It also builds a second kernel file
+   with the kernel's `panic-at-entry` feature, which panics as soon as it
+   starts.
 2. For each scenario below it lays out a separate disk folder, starts QEMU
    with UEFI firmware and presents that folder as a FAT disk. No window is
    shown, and the imitation serial port is connected to the test.
 3. The firmware finds and runs the boot stage, as it would on a real PC.
-4. The boot stage prints its lines. Because it was built with the `qemu-exit`
-   feature, it then writes to a special QEMU device that makes QEMU quit:
-   with exit code 33 if the kernel file was read, checked, copied and given
-   its addresses, 35 if not.
+4. The boot stage prints its lines. If anything failed, it then writes to
+   a special QEMU device that makes QEMU quit with exit code 35. Otherwise
+   it jumps to the kernel, which prints its own line and makes QEMU quit
+   with codes of its own: 65 once it has printed `BISMUTH KERNEL OK`, 67
+   if it panicked. (33 was the boot stage's success before it started the
+   kernel; nothing uses it now.)
 5. A scenario passes if the serial output contains `BISMUTH BOOT OK` and then
-   its expected line, and QEMU exits with the expected code within the time
-   limit. Anything else fails, and the captured output is shown.
+   its expected lines in order, and QEMU exits with the expected code within
+   the time limit. Anything else fails, and the captured output is shown.
+   If the firmware reports a processor exception (a line starting `!!!!
+   X64 Exception Type`), for example because the kernel faulted, the test
+   stops QEMU at once rather than wait for the time limit, since the
+   firmware stops the processor after its report. A triple fault resets
+   the machine, which QEMU's `-no-reboot` turns into exit code 0.
 
-The twelve scenarios:
+The thirteen scenarios. "Started" stands for the lines of a boot that gets
+as far as the kernel: `BISMUTH KERNEL FILE OK entry=... segments=...
+bytes=...`, matching what the ELF reader finds in the same file, then
+`BISMUTH KERNEL COPIED segments=... pages=... sum=...`, matching the pages
+the test lays out from the file itself, then `BISMUTH KERNEL PLACED` with
+the same numbers and each segment's permissions from its flags (`wp=`
+exactly `0` or `1`), then the firmware console's `Bismuth kernel addresses
+checked.`, then `BISMUTH KERNEL JUMP entry=... stack=0xffffffff80000000`
+with the file's entry point.
 
-| Disk | Expected line | Exit code |
+| Disk | Expected lines | Exit code |
 |---|---|---|
-| The real kernel file | `BISMUTH KERNEL FILE OK entry=... segments=... bytes=...`, matching what the ELF reader finds in the same file, then `BISMUTH KERNEL COPIED segments=... pages=... sum=...`, matching the pages the test lays out from the file itself, then `BISMUTH KERNEL PLACED` with the same numbers and each segment's permissions from its flags (`wp` may be either), then the firmware console's `Bismuth kernel addresses checked.` | 33 |
+| The real kernel file | Started, then `BISMUTH KERNEL OK` | 65 |
 | No kernel file | `BISMUTH KERNEL FILE ERROR: file not found` | 35 |
 | An empty file | `BISMUTH KERNEL FILE ERROR: file is empty` | 35 |
 | A file whose signature is damaged | `BISMUTH KERNEL FILE ERROR: ELF reader: BadSignature` | 35 |
@@ -252,13 +326,14 @@ The twelve scenarios:
 | The kernel moved to a low address | `BISMUTH KERNEL PLACE ERROR: entry point below 0xffffffff80000000` | 35 |
 | The second segment moved onto the first one's page | `BISMUTH KERNEL PLACE ERROR: segments 0 and 1 share a page` | 35 |
 | The last segment grown to 64 MiB | `BISMUTH KERNEL PLACE ERROR: ... pages, more than the limit of 16384` | 35 |
-| The last segment grown by two pages the file does not fill | The `FILE OK`, `COPIED` and `PLACED` lines, with the pages and sum the test lays out from this file | 33 |
+| The last segment grown by two pages the file does not fill | Started, with the pages and sum the test lays out from this file, then `BISMUTH KERNEL OK` | 65 |
 | The entry point moved to the start of the read-only segment | `BISMUTH KERNEL PLACE ERROR: entry point not in an executable segment` | 35 |
-| The last segment moved onto the last page of the address range | `BISMUTH KERNEL PLACE ERROR: segment 1 uses the last page of the address range` | 35 |
+| The last segment moved onto the last page of the address range | `BISMUTH KERNEL PLACE ERROR: segment ... uses the last page of the address range`, naming the last segment | 35 |
 | The real kernel file, on a processor without no-execute pages (QEMU's `-cpu qemu64,-nx`) | The `FILE OK` and `COPIED` lines, then `BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute` | 35 |
+| The kernel file built to panic on entry | Started, then `BISMUTH KERNEL PANIC`, and never `BISMUTH KERNEL OK` | 67 |
 
-The `qemu-exit` feature is off in normal builds. On a real PC nothing answers
-at that port, so the write is left out entirely.
+The `qemu-exit` features are off in normal builds. On a real PC nothing
+answers at that port, so the writes are left out entirely.
 
 ## Why our own boot stage
 
@@ -301,3 +376,11 @@ chapter 5. The registers in `boot/src/cpu.rs` (CR0, CR3, CR4 and
 manual, volume 2, chapter 3, section "System-Control Registers"; the
 no-execute check reads `CPUID` leaf 80000001H (Intel volume 2A, the
 `CPUID` entry; AMD volume 3, appendix E).
+
+The jump to the kernel in `boot/src/cpu.rs` uses `CLI`, `CLD`, `LEA` and
+`JMP` (Intel volume 2A, each instruction's entry), and the state it leaves
+the stack and flags in is what the System V AMD64 psABI, section 3.2
+"Function Calling Sequence", asks of a function's entry. The kernel's
+port access in `kernel/src/port.rs` uses `IN` and `OUT` (Intel volumes 2A
+and 2B), and its serial port in `kernel/src/serial.rs` follows the
+registers of the 16550 UART (the PC16550D data sheet).

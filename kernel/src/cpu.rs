@@ -1,5 +1,5 @@
-//! Processor instructions the kernel uses. All of the kernel's `unsafe`
-//! lives here.
+//! Processor instructions the kernel uses. The kernel's `unsafe` lives
+//! here and in `port` and `serial`.
 
 use core::arch::asm;
 
