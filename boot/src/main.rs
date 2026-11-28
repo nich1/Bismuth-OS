@@ -3,14 +3,18 @@
 //! The firmware (UEFI) loads this program from the boot disk and calls
 //! [`efi_main`]. It writes one line to the serial port and one to the
 //! firmware console, reads the kernel file from the disk it was loaded from
-//! and checks it with the ELF reader, copies its segments into memory,
-//! reports each step on the serial port, then stops. Starting the kernel
-//! comes later. See `docs/boot.md`.
+//! and checks it with the ELF reader, copies its segments into memory, gives
+//! them their kernel addresses in new address tables, reports each step on
+//! the serial port, then stops. Starting the kernel comes later. See
+//! `docs/boot.md`.
 
 #![no_std]
 #![no_main]
 
+mod cpu;
 mod load;
+mod map;
+mod memory;
 mod port;
 mod report;
 mod serial;
@@ -48,7 +52,8 @@ pub unsafe extern "efiapi" fn efi_main(
 
     // SAFETY: by this function's contract, `system_table` is the pointer the
     // firmware handed to the entry point, and boot services are still running.
-    if let Some(console) = unsafe { uefi::Console::from_system_table(system_table) } {
+    let console = unsafe { uefi::Console::from_system_table(system_table) };
+    if let Some(console) = &console {
         console.write_str("Bismuth boot stage reached.\n");
     }
 
@@ -80,8 +85,32 @@ pub unsafe extern "efiapi" fn efi_main(
         serial.write_str("\n");
     }
 
+    let placed = match (&copied, &boot_services) {
+        (Some(Ok(kernel)), Some(boot_services)) => {
+            Some((kernel, map::place(boot_services, kernel)))
+        }
+        _ => None,
+    };
+    if let Some((kernel, placed)) = &placed {
+        let line = match placed {
+            Ok(placed) => report::placed_line(
+                kernel.pages(),
+                placed.sum,
+                placed.permissions(),
+                placed.write_protect,
+            ),
+            Err(failure) => report::map_error_line(failure),
+        };
+        serial.write_str(line.as_str());
+        serial.write_str("\n");
+        // A firmware service, called under the new tables.
+        if let (Some(console), Ok(_)) = (&console, placed) {
+            console.write_str("Bismuth kernel addresses checked.\n");
+        }
+    }
+
     #[cfg(feature = "qemu-exit")]
-    qemu_exit(matches!(copied, Some(Ok(_))));
+    qemu_exit(matches!(placed, Some((_, Ok(_)))));
 
     halt()
 }
@@ -98,7 +127,8 @@ fn read_kernel(
 }
 
 /// Tells QEMU to quit, so the boot test can finish: with exit code 33 if the
-/// kernel file was read, checked and copied, 35 if not.
+/// kernel file was read, checked, copied and given its addresses, 35 if
+/// not.
 #[cfg(feature = "qemu-exit")]
 fn qemu_exit(success: bool) {
     /// Port of QEMU's `isa-debug-exit` device, as configured by `xtask`.

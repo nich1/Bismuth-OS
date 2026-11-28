@@ -19,6 +19,8 @@ pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 pub const PAGE_SIZE: u64 = 4096;
 /// The bits of an address that give its place within a page.
 const IN_PAGE: u64 = PAGE_SIZE - 1;
+/// The last page of the address range, which no segment may use.
+const LAST_PAGE: u64 = !IN_PAGE;
 /// The most pages all segments together may take: 64 MiB, the same as the
 /// largest kernel file the boot stage reads. A kernel needs far less, and a
 /// damaged memory size must not ask the firmware for most of the machine.
@@ -58,6 +60,12 @@ pub enum Error {
         /// The segment's number.
         segment: usize,
     },
+    /// A segment's memory uses the last page of the address range, which
+    /// the boot stage cannot read as a block: its end would be 2^64.
+    LastPage {
+        /// The segment's number.
+        segment: usize,
+    },
     /// More than [`MAX_SEGMENTS`] segments take memory.
     TooManySegments,
     /// Two segments take the same page, which can only have one set of
@@ -73,6 +81,9 @@ pub enum Error {
         /// How many they take.
         pages: u64,
     },
+    /// The entry point is not inside the memory of a segment that may be
+    /// run, so starting the kernel would fault.
+    EntryNotExecutable,
 }
 
 /// Where one segment goes: the pages it takes at its linked address, and
@@ -141,7 +152,8 @@ impl Placement {
 }
 
 /// Checks that `elf` can be placed as linked and says where each segment
-/// goes.
+/// goes. That the entry point lies in a segment that may be run is checked
+/// last, once every segment's layout has passed.
 pub fn place(elf: &Elf) -> Result<Placement, Error> {
     place_segments(elf.file_type(), elf.entry(), elf.segments())
 }
@@ -163,7 +175,9 @@ pub fn place_segments(
         placed: [Placed::EMPTY; MAX_SEGMENTS],
         count: 0,
     };
+    let mut entered = false;
     for (segment, s) in segments.into_iter().enumerate() {
+        entered |= s.flags.execute && s.contains(entry);
         if s.address < KERNEL_BASE {
             return Err(Error::BelowBase { segment });
         }
@@ -180,6 +194,9 @@ pub fn place_segments(
             .address
             .checked_add(last_byte)
             .ok_or(Error::PastTheTop { segment })?;
+        if last & !IN_PAGE == LAST_PAGE {
+            return Err(Error::LastPage { segment });
+        }
         let page = s.address & !IN_PAGE;
         let pages = ((last & !IN_PAGE).saturating_sub(page) / PAGE_SIZE).saturating_add(1);
         let slot = placement
@@ -211,6 +228,9 @@ pub fn place_segments(
     let pages = placement.pages();
     if pages > PAGE_LIMIT {
         return Err(Error::TooManyPages { pages });
+    }
+    if !entered {
+        return Err(Error::EntryNotExecutable);
     }
     Ok(placement)
 }

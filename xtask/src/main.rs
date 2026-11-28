@@ -224,9 +224,9 @@ fn kernel_image() -> PathBuf {
         .join("KERNEL.ELF")
 }
 
-/// Fails unless the kernel file has at least one loadable segment, a layout
-/// with no [`layout_problems`] and an entry point inside an executable
-/// segment, and describes the file.
+/// Fails unless the kernel file has at least one loadable segment and passes
+/// the placement rules the boot stage uses (among them, that the entry point
+/// is inside an executable segment), and describes the file.
 fn describe_kernel(bytes: &[u8]) -> Result<String> {
     let elf = bismuth_elf::Elf::parse(bytes)
         .map_err(|error| format!("the ELF reader rejected the kernel: {error:?}"))?;
@@ -253,15 +253,10 @@ fn describe_kernel(bytes: &[u8]) -> Result<String> {
     if elf.segments().next().is_none() {
         return Err(format!("the kernel has no loadable segment:\n{text}"));
     }
-    if let Err(error) = place::place(&elf) {
-        return Err(format!(
+    match place::place(&elf) {
+        Ok(_) => Ok(text),
+        Err(error) => Err(format!(
             "the kernel cannot be placed as linked: {error:?}\n{text}"
-        ));
-    }
-    match elf.entry_segment() {
-        Some(segment) if segment.flags.execute => Ok(text),
-        _ => Err(format!(
-            "the kernel's entry point is not in an executable segment:\n{text}"
         )),
     }
 }
@@ -301,6 +296,39 @@ fn copied_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
         sum.value()
     )
 }
+
+/// The line the boot stage prints after giving the kernel file `bytes` its
+/// addresses: the same segments, pages and sum as [`copied_line`], each
+/// segment's permissions from its flags, and any state of `CR0.WP`, which
+/// is the firmware's and is only reported.
+fn placed_line(bytes: &[u8], elf: &bismuth_elf::Elf) -> String {
+    let copied = copied_line(bytes, elf);
+    let counts = copied
+        .strip_prefix("BISMUTH KERNEL COPIED ")
+        .expect("copied_line's prefix");
+    let permissions: Vec<String> = elf
+        .segments()
+        .filter(|s| s.memory_size > 0)
+        .map(|s| {
+            let write = if s.flags.write { "w" } else { "-" };
+            let execute = if s.flags.execute { "x" } else { "-" };
+            format!("r{write}{execute}")
+        })
+        .collect();
+    format!(
+        "BISMUTH KERNEL PLACED {counts} perms={} wp={ANY}",
+        permissions.join(",")
+    )
+}
+
+/// What the boot stage writes on the firmware's console once the kernel is
+/// at its addresses, under the new address tables. The firmware in QEMU
+/// copies its console to the serial port, so this shows that a firmware
+/// service still works after the switch.
+const CONSOLE_AFTER_SWITCH: &str = "Bismuth kernel addresses checked.";
+
+/// At the end of an expected line, stands for any text.
+const ANY: &str = "*";
 
 /// The offsets in `kernel` of its loadable segments' program headers. gABI
 /// ch. 4, "ELF Header": `e_phoff` is the eight bytes at 32 and `e_phnum` the
@@ -406,8 +434,13 @@ struct Scenario {
     kernel: Option<Vec<u8>>,
     /// Lines the serial output must contain, in this order.
     lines: Vec<String>,
+    /// Lines the serial output must not contain anywhere.
+    absent: Vec<String>,
     /// The exit code QEMU must end with.
     exit_code: i32,
+    /// The processor model QEMU imitates (its `-cpu` argument), or `None`
+    /// for QEMU's default.
+    cpu: Option<&'static str>,
 }
 
 impl Scenario {
@@ -416,7 +449,9 @@ impl Scenario {
             name,
             kernel: kernel.map(<[u8]>::to_vec),
             lines: vec![BOOT_MARKER.to_string(), line],
+            absent: Vec::new(),
             exit_code,
+            cpu: None,
         }
     }
 
@@ -458,8 +493,10 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
     let truncated = kernel
         .get(..cut)
         .ok_or("the kernel is too short to truncate")?;
-    let mut normal = Scenario::new("normal", Some(kernel), ok, QEMU_SUCCESS_EXIT);
+    let mut normal = Scenario::new("normal", Some(kernel), ok.clone(), QEMU_SUCCESS_EXIT);
     normal.lines.push(copied_line(kernel, &elf));
+    normal.lines.push(placed_line(kernel, &elf));
+    normal.lines.push(CONSOLE_AFTER_SWITCH.to_string());
 
     // gABI ch. 4, "ELF Header": `e_entry` is the eight bytes at 24; ch. 5,
     // "Program Header": `p_vaddr` is at 16 and `p_memsz` at 40 in a header.
@@ -494,6 +531,43 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
         .iter()
         .map(|image| image.len() / 4096)
         .sum();
+    // The last segment grown by two pages it does not fill from the file,
+    // so it takes three or more: every page must be cleared, copied,
+    // summed and mapped, not only the first.
+    let mut long = kernel.to_vec();
+    set_u64(
+        &mut long,
+        last + 40,
+        get_u64(kernel, last + 40) + 2 * place::PAGE_SIZE,
+    );
+    let long_elf = bismuth_elf::Elf::parse(&long)
+        .map_err(|error| format!("the ELF reader rejected the long kernel: {error:?}"))?;
+    let mut long_segment =
+        Scenario::new("long-segment", Some(&long), ok.clone(), QEMU_SUCCESS_EXIT);
+    long_segment.lines.push(copied_line(&long, &long_elf));
+    long_segment.lines.push(placed_line(&long, &long_elf));
+    // The last segment moved onto the last page of the address range, at
+    // the same place in the page.
+    let mut top_page = kernel.to_vec();
+    set_u64(
+        &mut top_page,
+        last + 16,
+        get_u64(kernel, last + 16) | !(place::PAGE_SIZE - 1),
+    );
+    // The real kernel on a processor without no-execute pages: the
+    // `qemu64` model, QEMU's default for this machine, with the feature
+    // (CPUID 80000001h, EDX bit 20) taken away.
+    let mut no_execute = Scenario::new("no-execute", Some(kernel), ok.clone(), QEMU_FAILURE_EXIT);
+    no_execute.lines.push(copied_line(kernel, &elf));
+    no_execute
+        .lines
+        .push("BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute".into());
+    no_execute.cpu = Some(NO_EXECUTE_CPU);
+    no_execute.absent.push(CONSOLE_AFTER_SWITCH.to_string());
+    // Entered at the first byte of the first segment, which the kernel
+    // linker makes read-only.
+    let mut entry_not_code = kernel.to_vec();
+    set_u64(&mut entry_not_code, 24, get_u64(kernel, first + 16));
 
     Ok(vec![
         normal,
@@ -523,8 +597,26 @@ fn scenarios(kernel: &[u8]) -> Result<Vec<Scenario>> {
                 place::PAGE_LIMIT
             ),
         ),
+        long_segment,
+        Scenario::place_error(
+            "entry-not-code",
+            &entry_not_code,
+            "entry point not in an executable segment",
+        ),
+        Scenario::place_error(
+            "top-page",
+            &top_page,
+            &format!(
+                "segment {} uses the last page of the address range",
+                loads.len() - 1
+            ),
+        ),
+        no_execute,
     ])
 }
+
+/// The processor model for the scenario without no-execute pages.
+const NO_EXECUTE_CPU: &str = "qemu64,-nx";
 
 /// Builds the boot stage with `qemu-exit`, runs every boot scenario and
 /// fails if any did not behave as expected.
@@ -536,7 +628,7 @@ fn test() -> Result<()> {
     for scenario in scenarios(&kernel)? {
         let started = Instant::now();
         let disk = scenario_disk(&scenario)?;
-        let (status, serial) = boot(&disk)?;
+        let (status, serial) = boot(&disk, scenario.cpu)?;
         let seconds = started.elapsed().as_secs_f32();
         if let Some(reason) = boot_failure(&scenario, status, &serial) {
             eprintln!(
@@ -601,18 +693,29 @@ fn boot_failure(scenario: &Scenario, status: Option<i32>, serial: &str) -> Optio
     }
     let mut printed = serial.lines().map(|line| line.trim_end_matches('\r'));
     for line in &scenario.lines {
-        if !printed.any(|printed| printed == line) {
+        let matches = |printed: &str| match line.strip_suffix(ANY) {
+            Some(start) => printed.starts_with(start),
+            None => printed == line,
+        };
+        if !printed.any(matches) {
             return Some(format!("serial output did not contain {line:?} in order"));
         }
+    }
+    let mut all = serial.lines().map(|line| line.trim_end_matches('\r'));
+    if let Some(line) = all.find(|line| scenario.absent.iter().any(|absent| absent == line)) {
+        return Some(format!("serial output contained {line:?}"));
     }
     None
 }
 
-/// Boots the folder `disk` in QEMU with no window. Returns QEMU's exit code,
-/// or `None` if it ran past [`BOOT_TIMEOUT`] or was stopped by a signal, and
-/// the serial output.
-fn boot(disk: &str) -> Result<(Option<i32>, String)> {
+/// Boots the folder `disk` in QEMU with no window, imitating processor model
+/// `cpu` if one is given. Returns QEMU's exit code, or `None` if it ran past
+/// [`BOOT_TIMEOUT`] or was stopped by a signal, and the serial output.
+fn boot(disk: &str, cpu: Option<&str>) -> Result<(Option<i32>, String)> {
     let mut qemu = qemu_command(disk)?;
+    if let Some(cpu) = cpu {
+        qemu.args(["-cpu", cpu]);
+    }
     qemu.args(["-serial", "stdio", "-display", "none", "-no-reboot"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .stdin(Stdio::null())
@@ -1012,7 +1115,7 @@ fn paths_in_markdown(text: &str) -> Vec<&str> {
 mod tests {
     use super::{
         Result, Scenario, Step, Stop, boot_failure, describe_kernel, locate_qemu, page_images,
-        paths_in_markdown, run_steps, scenarios,
+        paths_in_markdown, placed_line, run_steps, scenarios,
     };
     use bismuth_elf::place::{Error as PlaceError, KERNEL_BASE, PAGE_LIMIT};
     use std::cell::RefCell;
@@ -1045,6 +1148,34 @@ mod tests {
     }
 
     #[test]
+    fn a_boot_fails_on_a_line_that_must_be_absent() {
+        let mut scenario = missing();
+        scenario.absent.push("NOT THIS".to_string());
+        let good = "BISMUTH BOOT OK\nBISMUTH KERNEL FILE ERROR: file not found\n";
+        assert_eq!(boot_failure(&scenario, Some(35), good), None);
+        let bad = "NOT THIS\nBISMUTH BOOT OK\nBISMUTH KERNEL FILE ERROR: file not found\n";
+        let failure = boot_failure(&scenario, Some(35), bad).expect("fails");
+        assert!(failure.contains("contained \"NOT THIS\""), "{failure}");
+    }
+
+    #[test]
+    fn an_expected_line_ending_in_a_star_matches_any_ending() {
+        let scenario = Scenario::new("star", None, "LINE a=1 b=*".to_string(), 33);
+        for (serial, passes) in [
+            ("BISMUTH BOOT OK\nLINE a=1 b=0\n", true),
+            ("BISMUTH BOOT OK\nLINE a=1 b=\n", true),
+            ("BISMUTH BOOT OK\nLINE a=2 b=0\n", false),
+            ("BISMUTH BOOT OK\nLINE a=1\n", false),
+        ] {
+            assert_eq!(
+                boot_failure(&scenario, Some(33), serial).is_none(),
+                passes,
+                "{serial}"
+            );
+        }
+    }
+
+    #[test]
     fn the_scenarios_damage_the_kernel_as_named() {
         let kernel = two_segment_kernel();
         let all = scenarios(&kernel).expect("scenarios");
@@ -1059,7 +1190,11 @@ mod tests {
                 "truncated",
                 "linked-low",
                 "shared-page",
-                "too-large"
+                "too-large",
+                "long-segment",
+                "entry-not-code",
+                "top-page",
+                "no-execute"
             ]
         );
         assert_eq!(
@@ -1097,6 +1232,11 @@ mod tests {
                 &all[7],
                 PlaceError::TooManyPages { pages },
                 format!("{pages} pages, more than the limit of {PAGE_LIMIT}"),
+            ),
+            (
+                &all[9],
+                PlaceError::EntryNotExecutable,
+                "entry point not in an executable segment".to_string(),
             ),
         ] {
             let file = scenario.kernel.as_deref().expect("has a file");
@@ -1148,14 +1288,20 @@ mod tests {
     #[test]
     fn a_kernel_entered_in_a_data_segment_fails() {
         let error = describe_kernel(&kernel_file(0b110, KERNEL_BASE + 0x40, 1)).expect_err("fails");
-        assert!(error.contains("not in an executable segment"), "{error}");
+        assert!(
+            error.starts_with("the kernel cannot be placed as linked: EntryNotExecutable\n"),
+            "{error}"
+        );
     }
 
     #[test]
     fn a_kernel_entered_outside_every_segment_fails() {
         let error =
             describe_kernel(&kernel_file(0b101, KERNEL_BASE + 0x1000, 1)).expect_err("fails");
-        assert!(error.contains("not in an executable segment"), "{error}");
+        assert!(
+            error.starts_with("the kernel cannot be placed as linked: EntryNotExecutable\n"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1225,6 +1371,80 @@ mod tests {
                 sum.value()
             )
         );
+    }
+
+    #[test]
+    fn the_placed_lines_expect_the_copied_sum_and_each_segments_permissions() {
+        let kernel = two_segment_kernel();
+        let all = scenarios(&kernel).expect("scenarios");
+        let normal = &all[0];
+        let copied = normal.lines[2]
+            .strip_prefix("BISMUTH KERNEL COPIED ")
+            .expect("copied");
+        assert_eq!(
+            normal.lines[3],
+            format!("BISMUTH KERNEL PLACED {copied} perms=r--,r-x wp=*")
+        );
+        assert_eq!(normal.lines[4], "Bismuth kernel addresses checked.");
+        // The code grown from one page to three, the two new ones zero.
+        let long = &all[8];
+        assert_eq!(long.exit_code, 33);
+        let file = long.kernel.as_deref().expect("has a file");
+        // The pages hold the patched file, then zeros.
+        let mut sum = bismuth_elf::place::Fnv1a::new();
+        sum.add(file);
+        sum.add(&[0; 0x2000]);
+        assert_eq!(
+            long.lines[2],
+            format!(
+                "BISMUTH KERNEL COPIED segments=2 pages=4 sum={:#x}",
+                sum.value()
+            )
+        );
+        let elf = bismuth_elf::Elf::parse(file).expect("valid");
+        assert_eq!(long.lines[3], placed_line(file, &elf));
+        assert!(long.lines[3].contains(" pages=4 "), "{}", long.lines[3]);
+        assert_eq!(&long.lines[1], &normal.lines[1]);
+    }
+
+    #[test]
+    fn only_the_no_execute_scenario_changes_the_processor() {
+        let kernel = two_segment_kernel();
+        let all = scenarios(&kernel).expect("scenarios");
+        let changed: Vec<_> = all.iter().filter(|s| s.cpu.is_some()).collect();
+        assert_eq!(changed.len(), 1);
+        let scenario = changed[0];
+        assert_eq!(
+            (scenario.name, scenario.cpu, scenario.exit_code),
+            ("no-execute", Some("qemu64,-nx"), 35)
+        );
+        assert_eq!(scenario.kernel.as_deref(), Some(&kernel[..]));
+        assert_eq!(
+            scenario.lines.last().map(String::as_str),
+            Some("BISMUTH KERNEL MAP ERROR: the processor cannot mark pages no-execute")
+        );
+        assert_eq!(scenario.absent, ["Bismuth kernel addresses checked."]);
+    }
+
+    #[test]
+    fn the_top_page_scenario_moves_the_last_segment_there() {
+        // The code shortened to half a page, so that on the top page it
+        // ends below 2^64, which the ELF reader requires.
+        let mut kernel = two_segment_kernel();
+        kernel[152..168].copy_from_slice(&[0, 8, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0]);
+        let all = scenarios(&kernel).expect("scenarios");
+        let top = all.iter().find(|s| s.name == "top-page").expect("top-page");
+        let file = top.kernel.as_deref().expect("has a file");
+        let elf = bismuth_elf::Elf::parse(file).expect("the ELF reader accepts it");
+        assert_eq!(
+            bismuth_elf::place::place(&elf).map(|_| ()),
+            Err(PlaceError::LastPage { segment: 1 })
+        );
+        assert_eq!(
+            top.lines[1],
+            "BISMUTH KERNEL PLACE ERROR: segment 1 uses the last page of the address range"
+        );
+        assert_eq!(top.exit_code, 35);
     }
 
     #[test]

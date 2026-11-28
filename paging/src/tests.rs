@@ -654,12 +654,14 @@ fn random_mappings_match_the_model() {
                     let page = first.wrapping_add(i * PAGE);
                     if canonical(page) {
                         assert_eq!(walk(&memory, page), model.expected(page), "{page:#x}");
+                        assert_translates_as_walked(&mut memory, page);
                     }
                 }
             }
         }
         for &page in model.pages.keys() {
             assert_eq!(walk(&memory, page), model.expected(page), "{page:#x}");
+            assert_translates_as_walked(&mut memory, page);
         }
     }
     // Every outcome but a large page, which `map` never creates, must be
@@ -676,4 +678,126 @@ fn random_mappings_match_the_model() {
         let count = outcomes.get(name).copied().unwrap_or(0);
         assert!(count >= 20, "{outcomes:?}");
     }
+}
+
+/// Checks that [`translate`] agrees with [`walk`] about `page`, at a byte
+/// inside the page.
+fn assert_translates_as_walked(memory: &mut Memory, page: u64) {
+    let expected = match walk(memory, page) {
+        Found::Unmapped => None,
+        Found::Page(physical, permissions) => Some((physical + 0x123, permissions)),
+    };
+    let root = memory.root();
+    assert_eq!(translate(memory, root, page + 0x123), expected, "{page:#x}");
+}
+
+/// An address whose four table indices all differ, mapped alone with `ALL`
+/// to 0x9_8000, so frames 1, 2 and 3 are the tables below the top.
+const LONE: u64 = 0x0000_1234_5678_9000;
+
+/// The tables for [`LONE`] and the index of its entry in each, top first.
+fn lone() -> (Memory, [(usize, usize); 4]) {
+    let mut memory = Memory::new(3);
+    map_pages(&mut memory, LONE, 0x9_8000, 1, ALL);
+    let index = |shift: u32| ((LONE >> shift) & 0x1FF) as usize;
+    let on_the_way = [
+        (0, index(39)),
+        (1, index(30)),
+        (2, index(21)),
+        (3, index(12)),
+    ];
+    (memory, on_the_way)
+}
+
+#[test]
+fn translates_a_mapped_page_and_the_bytes_inside_it() {
+    let (mut memory, _) = lone();
+    let root = memory.root();
+    for offset in [0, 1, 0xFFF] {
+        assert_eq!(
+            translate(&mut memory, root, LONE + offset),
+            Some((0x9_8000 + offset, ALL))
+        );
+    }
+    assert_eq!(translate(&mut memory, root, LONE + PAGE), None);
+    assert_eq!(translate(&mut memory, root, LONE - 1), None);
+}
+
+#[test]
+fn every_level_can_forbid_writes_or_running() {
+    for level in 0..4 {
+        let (mut memory, on_the_way) = lone();
+        let (frame, index) = on_the_way[level];
+        let root = memory.root();
+        memory.frames[frame][index] &= !WRITABLE;
+        assert_eq!(
+            translate(&mut memory, root, LONE),
+            Some((0x9_8000, READ_EXECUTE)),
+            "read-only at level {level}"
+        );
+        memory.frames[frame][index] |= WRITABLE | NO_EXECUTE;
+        assert_eq!(
+            translate(&mut memory, root, LONE),
+            Some((0x9_8000, READ_WRITE)),
+            "no-execute at level {level}"
+        );
+        // Accessed, dirty, user and caching bits change nothing.
+        memory.frames[frame][index] |= 0b111_1100;
+        memory.frames[frame][index] &= !(1 << 7);
+        assert_eq!(
+            translate(&mut memory, root, LONE),
+            Some((0x9_8000, READ_WRITE)),
+            "other bits at level {level}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_entry_at_any_level_means_not_mapped() {
+    for level in 0..4 {
+        let (mut memory, on_the_way) = lone();
+        let (frame, index) = on_the_way[level];
+        let root = memory.root();
+        memory.frames[frame][index] &= !PRESENT;
+        assert_eq!(translate(&mut memory, root, LONE), None, "level {level}");
+    }
+}
+
+#[test]
+fn follows_large_pages_on_the_way() {
+    let mut memory = Memory::new(100);
+    map_pages(&mut memory, 0x1F_F000, 0x1000, 1, READ);
+    let root = memory.root();
+    // As in `refuses_to_map_inside_a_large_page`: frame 1 is the
+    // directory-pointer table and frame 2 the directory. Bit 12 of a large
+    // page entry is a caching bit, not part of the address.
+    memory.frames[1][1] = 0x1_4000_0000 | 1 << 12 | 1 << 7 | WRITABLE | PRESENT;
+    memory.frames[2][1] = 0x60_0000 | 1 << 12 | 1 << 7 | NO_EXECUTE | PRESENT;
+    assert_eq!(
+        translate(&mut memory, root, 0x4000_0000 + 0x1234_5678),
+        Some((0x1_4000_0000 + 0x1234_5678, ALL))
+    );
+    assert_eq!(
+        translate(&mut memory, root, 0x20_0000 + 0x1_2345),
+        Some((0x60_0000 + 0x1_2345, READ))
+    );
+    // The page beside them is unchanged.
+    assert_eq!(
+        translate(&mut memory, root, 0x1F_F000),
+        Some((0x1000, READ))
+    );
+    // A page-size bit in a top-level entry is reserved: not a 512 GiB page.
+    memory.frames[0][1] = (BASE + PAGE) | 1 << 7 | WRITABLE | PRESENT;
+    assert_eq!(translate(&mut memory, root, 1 << 39), None);
+}
+
+#[test]
+fn non_canonical_addresses_are_not_mapped() {
+    let mut memory = Memory::new(100);
+    map_pages(&mut memory, 0, 0x1000, 1, READ);
+    let root = memory.root();
+    assert_eq!(translate(&mut memory, root, 0), Some((0x1000, READ)));
+    // Bits 63:48 differ from bit 47, though the low bits index page 0.
+    assert_eq!(translate(&mut memory, root, 0x0001_0000_0000_0000), None);
+    assert_eq!(translate(&mut memory, root, 0xFFFF_0000_0000_0000), None);
 }

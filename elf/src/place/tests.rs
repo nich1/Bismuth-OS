@@ -92,11 +92,10 @@ fn a_position_independent_file_is_refused() {
 
 #[test]
 fn the_entry_point_may_be_the_base_but_not_below_it() {
-    assert!(place_at(KERNEL_BASE, &good_layout()).is_ok());
-    assert_eq!(
-        error(KERNEL_BASE - 1, &good_layout()),
-        Error::EntryBelowBase
-    );
+    let mut segments = good_layout();
+    segments[0].flags.execute = true;
+    assert!(place_at(KERNEL_BASE, &segments).is_ok());
+    assert_eq!(error(KERNEL_BASE - 1, &segments), Error::EntryBelowBase);
 }
 
 #[test]
@@ -185,28 +184,44 @@ fn a_segment_with_no_memory_inside_another_ones_page_takes_no_page() {
 }
 
 #[test]
-fn a_segment_may_end_at_the_top_of_the_address_range_but_not_wrap() {
+fn a_segment_may_not_use_the_last_page_of_the_address_range() {
+    // A slice of the segment's pages would end at 2^64, which the boot
+    // stage cannot read back.
     let top_page = 0u64.wrapping_sub(0x1000);
-    let mut segments = [segment(top_page + 0x800, 0x800, 0x800, false)];
-    let placement = place_at(KERNEL_BASE, &segments).expect("ends at 2^64");
+    let mut segments = [segment(top_page + 0x800, 0x800, 0x800, true)];
     assert_eq!(
-        (placement.segments()[0].page, placement.pages()),
-        (top_page, 1)
+        error(top_page + 0x800, &segments),
+        Error::LastPage { segment: 0 }
     );
+    // Wrapping past the top is still its own error.
     segments[0].memory_size = 0x801;
     assert_eq!(
         error(KERNEL_BASE, &segments),
         Error::PastTheTop { segment: 0 }
     );
-    // The very last byte alone.
-    let last = [segment(u64::MAX, 0xFFF, 1, false)];
-    assert_eq!(place_at(KERNEL_BASE, &last).expect("placed").pages(), 1);
+    // The very last byte alone, and a segment running into the last page.
+    let last = [segment(u64::MAX, 0xFFF, 1, true)];
+    assert_eq!(error(u64::MAX, &last), Error::LastPage { segment: 0 });
+    let into = [
+        segment(KERNEL_BASE, 0, 0x10, true),
+        segment(top_page - 0x1000, 0, 0x1001, false),
+    ];
+    assert_eq!(error(KERNEL_BASE, &into), Error::LastPage { segment: 1 });
+    // The page below it is fine.
+    let below = [segment(top_page - 0x1000, 0, 0x1000, true)];
+    assert_eq!(
+        place_at(top_page - 0x1000, &below)
+            .expect("placed")
+            .segments()[0]
+            .page,
+        top_page - 0x1000
+    );
 }
 
-/// `count` one-page segments, each on its own page.
+/// `count` one-page segments, each on its own page, the first one code.
 fn one_page_each(count: u64) -> Vec<Segment> {
     (0..count)
-        .map(|i| segment(KERNEL_BASE + 0x1000 * i, 0x1000 * i, 0x10, false))
+        .map(|i| segment(KERNEL_BASE + 0x1000 * i, 0x1000 * i, 0x10, i == 0))
         .collect()
 }
 
@@ -235,7 +250,7 @@ fn more_pages_than_the_limit_are_refused() {
     ];
     segments[1].memory_size = (PAGE_LIMIT - 1) * PAGE_SIZE;
     assert_eq!(
-        place_at(KERNEL_BASE, &segments)
+        place_at(KERNEL_BASE + 0x1000, &segments)
             .expect("at the limit")
             .pages(),
         PAGE_LIMIT
@@ -245,6 +260,54 @@ fn more_pages_than_the_limit_are_refused() {
         error(KERNEL_BASE, &segments),
         Error::TooManyPages {
             pages: PAGE_LIMIT + 1
+        }
+    );
+}
+
+#[test]
+fn the_entry_point_must_be_inside_an_executable_segment() {
+    // The code is 0x15 bytes at `KERNEL_BASE + 0x1280`.
+    let code = KERNEL_BASE + 0x1280;
+    for entry in [code, code + 0x14] {
+        assert!(place_at(entry, &good_layout()).is_ok(), "{entry:#x}");
+    }
+    // In the read-only and the writable segment, in the gap before the code
+    // on its own page, and just past the code.
+    for entry in [
+        KERNEL_BASE + 0x10,
+        KERNEL_BASE + 0x2300,
+        code - 1,
+        code + 0x15,
+    ] {
+        assert_eq!(
+            error(entry, &good_layout()),
+            Error::EntryNotExecutable,
+            "{entry:#x}"
+        );
+    }
+}
+
+#[test]
+fn the_entry_point_may_be_in_memory_the_file_does_not_fill() {
+    let mut segments = good_layout();
+    segments[1].memory_size = 0x2000;
+    segments[2].address += 0x2000;
+    assert!(place_at(KERNEL_BASE + 0x2000, &segments).is_ok());
+    // A code segment taking no memory holds no entry point.
+    let empty = [segment(KERNEL_BASE, 0, 0, true)];
+    assert_eq!(error(KERNEL_BASE, &empty), Error::EntryNotExecutable);
+}
+
+#[test]
+fn the_entry_point_rule_comes_after_the_layout_rules() {
+    // Entered in the read-only segment, which also shares a page.
+    let mut segments = good_layout();
+    segments[2].address = KERNEL_BASE + 0x298;
+    assert_eq!(
+        error(KERNEL_BASE, &segments),
+        Error::SharedPage {
+            first: 0,
+            second: 2
         }
     );
 }
