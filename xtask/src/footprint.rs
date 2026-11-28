@@ -23,6 +23,7 @@ const SOURCES: &[&str] = &[
     "frames/src",
     "handoff/src",
     "kernel/src",
+    "nvme/src",
     "paging/src",
     "pci/src",
 ];
@@ -713,6 +714,7 @@ unsafe fn a() {}",
 unsafe impl Sync for S {}
 unsafe extern {}",
         );
+        tree.write("nvme/src/lib.rs", "unsafe impl Send for N {}");
         tree.write("paging/src/lib.rs", "fn g() { unsafe { h() } }");
         tree.write("pci/src/lib.rs", "unsafe fn p() { unsafe { q() } }");
         tree.write(
@@ -816,6 +818,13 @@ unsafe extern {}",
                     }
                 ),
                 (
+                    "nvme/src/lib.rs".to_owned(),
+                    UnsafeCounts {
+                        impls: 1,
+                        ..UnsafeCounts::default()
+                    }
+                ),
+                (
                     "paging/src/lib.rs".to_owned(),
                     UnsafeCounts {
                         blocks: 1,
@@ -883,6 +892,7 @@ unsafe extern {}",
         tree.write("frames/src/lib.rs", "fn e() {}");
         tree.write("handoff/src/lib.rs", "fn e() {}");
         tree.write("kernel/src/main.rs", "fn c() {}");
+        tree.write("nvme/src/lib.rs", "fn h() {}");
         tree.write("paging/src/lib.rs", "fn d() {}");
         tree.write("pci/src/lib.rs", "fn g() {}");
         let image = tree.0.join("image.efi");
@@ -975,6 +985,7 @@ unsafe extern {}",
         tree.write("frames/src/lib.rs", "");
         tree.write("handoff/src/lib.rs", "");
         tree.write("kernel/src/main.rs", "");
+        tree.write("nvme/src/lib.rs", "");
         tree.write("paging/src/lib.rs", "");
         tree.write("pci/src/lib.rs", "");
         fs::write(tree.0.join("boot/src/main.rs"), [0xFF]).expect("file is written");

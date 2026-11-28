@@ -40,6 +40,8 @@ unsafe attributes in kernel/src/port.rs: 0
 unsafe attributes in kernel/src/serial.rs: 0
 unsafe attributes in kernel/src/takeover.rs: 0
 unsafe attributes in kernel/src/vectors.rs: 0
+unsafe attributes in nvme/src/lib.rs: 0
+unsafe attributes in nvme/src/tests.rs: 0
 unsafe attributes in paging/src/lib.rs: 0
 unsafe attributes in paging/src/tests.rs: 0
 unsafe attributes in pci/src/lib.rs: 0
@@ -82,6 +84,8 @@ unsafe blocks in kernel/src/port.rs: 3
 unsafe blocks in kernel/src/serial.rs: 3
 unsafe blocks in kernel/src/takeover.rs: 5
 unsafe blocks in kernel/src/vectors.rs: 2
+unsafe blocks in nvme/src/lib.rs: 0
+unsafe blocks in nvme/src/tests.rs: 0
 unsafe blocks in paging/src/lib.rs: 0
 unsafe blocks in paging/src/tests.rs: 0
 unsafe blocks in pci/src/lib.rs: 0
@@ -124,6 +128,8 @@ unsafe extern blocks in kernel/src/port.rs: 0
 unsafe extern blocks in kernel/src/serial.rs: 0
 unsafe extern blocks in kernel/src/takeover.rs: 0
 unsafe extern blocks in kernel/src/vectors.rs: 1
+unsafe extern blocks in nvme/src/lib.rs: 0
+unsafe extern blocks in nvme/src/tests.rs: 0
 unsafe extern blocks in paging/src/lib.rs: 0
 unsafe extern blocks in paging/src/tests.rs: 0
 unsafe extern blocks in pci/src/lib.rs: 0
@@ -166,6 +172,8 @@ unsafe fn declarations in kernel/src/port.rs: 2
 unsafe fn declarations in kernel/src/serial.rs: 0
 unsafe fn declarations in kernel/src/takeover.rs: 0
 unsafe fn declarations in kernel/src/vectors.rs: 0
+unsafe fn declarations in nvme/src/lib.rs: 0
+unsafe fn declarations in nvme/src/tests.rs: 0
 unsafe fn declarations in paging/src/lib.rs: 0
 unsafe fn declarations in paging/src/tests.rs: 0
 unsafe fn declarations in pci/src/lib.rs: 0
@@ -208,6 +216,8 @@ unsafe impls in kernel/src/port.rs: 0
 unsafe impls in kernel/src/serial.rs: 0
 unsafe impls in kernel/src/takeover.rs: 1
 unsafe impls in kernel/src/vectors.rs: 0
+unsafe impls in nvme/src/lib.rs: 0
+unsafe impls in nvme/src/tests.rs: 0
 unsafe impls in paging/src/lib.rs: 0
 unsafe impls in paging/src/tests.rs: 0
 unsafe impls in pci/src/lib.rs: 0
