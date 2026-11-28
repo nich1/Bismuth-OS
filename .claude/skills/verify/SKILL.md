@@ -19,7 +19,9 @@ description: Prove a change works and collect the evidence a pull request needs.
    *Check:* its last line, the verdict, is `check passed`. Keep the output
    in a file: each step's result is a line starting `check: `, spread
    through the tools' own output, so pick them out with
-   `grep '^check' <file>`, which also shows the verdict.
+   `grep '^check' <file>`. That also shows the verdict `check passed` or
+   `check FAILED at <step>`, but not the not-run verdict in the table
+   below, which does not start with `check`: read the last line for that.
 
 4. **List what the change adds to the system.** New `unsafe` blocks, system
    calls, message interfaces, components trusted to share memory with the
