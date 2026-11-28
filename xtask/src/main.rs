@@ -867,6 +867,14 @@ fn check() -> Result<()> {
             lints("bismuth-frames", &["--all-targets"]),
         ),
         cargo_step(
+            "unit tests (handoff)",
+            vec!["test", "--package", "bismuth-handoff"],
+        ),
+        cargo_step(
+            "lints (handoff)",
+            lints("bismuth-handoff", &["--all-targets"]),
+        ),
+        cargo_step(
             "unit tests (paging)",
             vec!["test", "--package", "bismuth-paging"],
         ),

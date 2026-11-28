@@ -19,6 +19,10 @@ name = "bismuth-frames"
 version = "0.0.0"
 
 [[package]]
+name = "bismuth-handoff"
+version = "0.0.0"
+
+[[package]]
 name = "bismuth-kernel"
 version = "0.0.0"
 

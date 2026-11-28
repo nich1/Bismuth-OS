@@ -26,6 +26,7 @@ something.
 | Placement rules | `elf/src/place.rs` | Part of the ELF reader. The one copy of the rules for placing the kernel at the addresses it is linked for (fixed-address executable, at or above `0xFFFF_FFFF_8000_0000`, no shared pages, at most 16384 pages and 8 segments, not on the last page of the address range, entry point in an executable segment), the pages each segment takes, and the FNV-1a checksum. Used by the boot stage and by `cargo xtask check` | `cargo xtask check` runs its unit tests (`elf/src/place/tests.rs`) |
 | Frame tracker | `frames/src/lib.rs` | Safe, allocation-free library that keeps track of which 4 KiB frames of a range of physical memory are free, in a bitmap the caller lends it: adds usable ranges, reserves taken ones, hands out the lowest free frame and takes it back, refuses bad calls with an error, and keeps exact counts with a recount to check them against. Not used by the boot stage or the kernel yet | `cargo xtask check` runs its unit tests (`frames/src/tests.rs`) |
 | Address table builder | `paging/src/lib.rs` | Safe, allocation-free library that builds x86-64 4-level address tables (page tables): maps a range of virtual addresses to physical ones with 4 KiB pages and read, write and execute permissions, in memory the caller lends it, and looks an address up the way the processor does. The boot stage uses it to put the kernel at its address and to check the result | `cargo xtask check` runs its unit tests (`paging/src/tests.rs`) |
+| Hand-off structure | `handoff/src/lib.rs` | Safe, allocation-free library for the structure the boot stage will hand the kernel: Bismuth's own memory map, with each firmware memory type turned into one of Bismuth's kinds. The builder takes firmware descriptors in any order, sets ranges aside for the kernel and writes the sorted, merged list; the reader checks any bytes and lists the regions and the usable pages. Nothing uses it yet | `cargo xtask check` runs its unit tests (`handoff/src/tests.rs`) |
 
 ## The boot disk
 
@@ -48,7 +49,7 @@ none.
 | Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands, `issue-list` among them. Its usage text is the list of commands. `test` runs the boot scenarios. `check` also runs the ELF reader and the placement rules on the kernel file |
 | Command table check | `xtask/src/command_tables.rs` | A unit test that fails when the command tables in `AGENTS.md` and `README.md` differ from the commands in the usage text |
 | Code host commands | `xtask/src/host.rs` | `pr-open`, `pr-edit`, `pr-ready`, `pr-wait`, `issue-list`, `issue-read`, `issue-comment` and `issue-new`, through `gh`. Checks every title and body with the rule in `tools/check-attribution.sh` before sending it |
-| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per file of the boot stage, kernel, ELF reader and address table builder, and third-party packages, and compares the report with the stored one |
+| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per file of the boot stage, the kernel and the libraries, and third-party packages, and compares the report with the stored one |
 | Stored footprint | `snapshots/footprint.txt` | The expected footprint report. `cargo xtask snapshot --update` rewrites it |
 | Kernel build settings | `.cargo/config.toml` | Builds the kernel as a fixed-address executable at `0xFFFF_FFFF_8000_0000`, and defines the `cargo xtask` alias |
 | Pinned compiler | `rust-toolchain.toml` | The Rust version and the build targets for the boot stage (UEFI) and the kernel |
@@ -66,6 +67,7 @@ none.
 |---|---|
 | `docs/decisions.md` | What has been decided, and why |
 | `docs/boot.md` | How the system starts |
+| `docs/handoff.md` | The structure the boot stage hands the kernel: its layout, the kinds of memory, and the firmware type to kind table |
 | `docs/testing.md` | How it is tested, the footprint snapshot, and the planned snapshots |
 | `docs/workflow.md` | Who does what, and the path of a task |
 | `AGENTS.md` | The rules every contributor follows |

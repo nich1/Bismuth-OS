@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["boot", "elf", "frames", "kernel", "paging", "xtask"]
+members = ["boot", "elf", "frames", "handoff", "kernel", "paging", "xtask"]
 # `boot` and `kernel` only build for their own targets, so plain `cargo build`
 # covers the host tools and the libraries. Use `cargo xtask build` for the
 # boot image and the kernel.
-default-members = ["elf", "frames", "paging", "xtask"]
+default-members = ["elf", "frames", "handoff", "paging", "xtask"]
 
 [workspace.package]
 version = "0.0.0"
