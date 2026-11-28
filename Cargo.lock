@@ -11,6 +11,7 @@ name = "bismuth-boot"
 version = "0.0.0"
 dependencies = [
  "bismuth-elf",
+ "bismuth-handoff",
  "bismuth-paging",
 ]
 

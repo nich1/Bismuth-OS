@@ -5,13 +5,15 @@
 //! firmware console, reads the kernel file from the disk it was loaded from
 //! and checks it with the ELF reader, copies its segments into memory, gives
 //! them their kernel addresses in new address tables along with a stack,
-//! reports each step on the serial port, then jumps to the kernel. On a
-//! failure it stops instead. See `docs/boot.md`.
+//! reads the memory map and ends the firmware's boot services, reports each
+//! step on the serial port, then jumps to the kernel. On a failure it stops
+//! instead. See `docs/boot.md`.
 
 #![no_std]
 #![no_main]
 
 mod cpu;
+mod leave;
 mod load;
 mod map;
 mod memory;
@@ -25,6 +27,7 @@ use core::panic::PanicInfo;
 
 use bismuth_elf::Elf;
 use bismuth_elf::place::STACK_TOP;
+use bismuth_handoff::Kind;
 use report::{Failure, Step};
 
 /// The line the automated boot test looks for on the serial port.
@@ -110,11 +113,44 @@ pub unsafe extern "efiapi" fn efi_main(
         }
     }
 
-    if let (Some((_, Ok(_))), Ok((_, elf))) = (&placed, &checked) {
+    // Leaving the firmware, once everything that allocates is done (the
+    // kernel's pages, its tables and its stack: any allocation changes the
+    // map key) and the firmware's console has printed its last line. The
+    // console is not used past here.
+    let left = match (&placed, boot_services) {
+        (Some((_, Ok(_))), Some(boot_services)) => {
+            let left = boot_services.leave();
+            // At once, before anything else runs: the firmware's timer and
+            // handlers belong to the boot services that have just ended.
+            // Not before the call, because a failed call leaves boot
+            // services running, which expect interrupts as they left them.
+            if left.is_ok() {
+                cpu::disable_interrupts();
+            }
+            Some(left)
+        }
+        _ => None,
+    };
+    if let Some(left) = &left {
+        let line = match left {
+            Ok((map, bytes)) => {
+                let usable = |kind| Kind::from_firmware_type(kind) == Kind::Usable;
+                let (descriptors, pages) = leave::count(bytes, map.descriptor_size, usable);
+                report::firmware_left_line(descriptors, pages)
+            }
+            Err(failure) => report::exit_error_line(failure),
+        };
+        serial.write_str(line.as_str());
+        serial.write_str("\n");
+    }
+
+    if let (Some(Ok(_)), Ok((_, elf))) = (&left, &checked) {
         let entry = elf.entry();
         serial.write_str(report::jump_line(entry, STACK_TOP).as_str());
         serial.write_str("\n");
-        // SAFETY: `map::place` succeeded, so the tables in CR3 map every
+        // SAFETY: the boot services have ended (`left` is only `Some(Ok)`
+        // after `map::place` succeeded) and nothing calls the firmware any
+        // more. `map::place` succeeded, so the tables in CR3 map every
         // segment of the kernel at its address with its own permissions,
         // and the placement rules put `entry` inside a segment that may be
         // run; the walk found every page where it belongs. They also map
@@ -123,8 +159,7 @@ pub unsafe extern "efiapi" fn efi_main(
         // kernel's entry is an `extern "sysv64"` function that never
         // returns (`kernel/src/main.rs`). Nothing of this program's runs
         // after the jump: its memory, the tables and the copied pages are
-        // the kernel's from then on, and boot services, still running, are
-        // not called again.
+        // the kernel's from then on.
         unsafe { cpu::enter_kernel(entry, STACK_TOP) }
     }
 
