@@ -11,6 +11,8 @@ use bismuth_elf::place::{
 };
 use bismuth_paging::{Error as PagingError, Permissions};
 
+use crate::leave::{DESCRIPTOR_SIZE, ExitFailure};
+
 /// A step of reading the kernel file that goes through the firmware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -455,6 +457,53 @@ fn push_found(line: &mut Line, found: Option<(u64, Permissions)>) {
 pub fn jump_line(entry: u64, stack_top: u64) -> Line {
     let mut line = Line::new("BISMUTH KERNEL JUMP entry=");
     line.push_hex(entry).push(" stack=").push_hex(stack_top);
+    line
+}
+
+/// `BISMUTH FIRMWARE LEFT descriptors=<n> usable=<pages>`: boot services
+/// have ended; the memory map they left has `n` descriptors, and `pages`
+/// 4 KiB pages of it are free for the kernel.
+pub fn firmware_left_line(descriptors: u64, usable: u64) -> Line {
+    let mut line = Line::new("BISMUTH FIRMWARE LEFT descriptors=");
+    line.push_decimal(descriptors)
+        .push(" usable=")
+        .push_decimal(usable);
+    line
+}
+
+/// `BISMUTH FIRMWARE EXIT ERROR: <short reason>`.
+pub fn exit_error_line(failure: &ExitFailure) -> Line {
+    let mut line = Line::new("BISMUTH FIRMWARE EXIT ERROR: ");
+    let status = |line: &mut Line, what: &str, status: usize| {
+        line.push(what).push(": status ").push_hex(status as u64);
+    };
+    match *failure {
+        ExitFailure::NoService => {
+            line.push("no GetMemoryMap or ExitBootServices service");
+        }
+        ExitFailure::SizeQuery(s) => status(&mut line, "asking for the memory map's size", s),
+        ExitFailure::Allocate(Some(s)) => status(&mut line, "no memory for the memory map", s),
+        ExitFailure::Allocate(None) => {
+            line.push("no memory for the memory map: no interface");
+        }
+        ExitFailure::ReadMap(s) => status(&mut line, "reading the memory map", s),
+        ExitFailure::MapTooLarge { size, capacity } => {
+            line.push("the memory map needs ")
+                .push_decimal(size as u64)
+                .push(" bytes, more than the buffer's ")
+                .push_decimal(capacity as u64);
+        }
+        ExitFailure::DescriptorSize(size) => {
+            line.push("descriptor size ")
+                .push_decimal(size as u64)
+                .push(" is below ")
+                .push_decimal(DESCRIPTOR_SIZE as u64);
+        }
+        ExitFailure::Exit(s) => status(&mut line, "ExitBootServices", s),
+        ExitFailure::StaleTwice => {
+            line.push("ExitBootServices: the map key was stale twice");
+        }
+    }
     line
 }
 
@@ -946,6 +995,74 @@ mod tests {
             "BISMUTH KERNEL JUMP entry=0xffffffff80001190 stack=0xffffffff80000000"
         );
         let longest = jump_line(u64::MAX, u64::MAX);
+        assert!(longest.as_str().len() < Line::CAPACITY);
+    }
+
+    #[test]
+    fn the_firmware_left_line_has_the_documented_shape() {
+        assert_eq!(
+            firmware_left_line(97, 52_313).as_str(),
+            "BISMUTH FIRMWARE LEFT descriptors=97 usable=52313"
+        );
+        let longest = firmware_left_line(u64::MAX, u64::MAX);
+        assert!(longest.as_str().len() < Line::CAPACITY);
+    }
+
+    #[test]
+    fn each_exit_failure_has_its_own_reason() {
+        let prefix = "BISMUTH FIRMWARE EXIT ERROR: ";
+        let status = 0x8000_0000_0000_0007;
+        let cases = [
+            (
+                ExitFailure::NoService,
+                "no GetMemoryMap or ExitBootServices service".to_string(),
+            ),
+            (
+                ExitFailure::SizeQuery(0),
+                "asking for the memory map's size: status 0x0".to_string(),
+            ),
+            (
+                ExitFailure::Allocate(Some(0x8000_0000_0000_0009)),
+                "no memory for the memory map: status 0x8000000000000009".to_string(),
+            ),
+            (
+                ExitFailure::Allocate(None),
+                "no memory for the memory map: no interface".to_string(),
+            ),
+            (
+                ExitFailure::ReadMap(status),
+                "reading the memory map: status 0x8000000000000007".to_string(),
+            ),
+            (
+                ExitFailure::MapTooLarge {
+                    size: 6000,
+                    capacity: 5184,
+                },
+                "the memory map needs 6000 bytes, more than the buffer's 5184".to_string(),
+            ),
+            (
+                ExitFailure::DescriptorSize(32),
+                format!("descriptor size 32 is below {DESCRIPTOR_SIZE}"),
+            ),
+            (
+                ExitFailure::Exit(status),
+                "ExitBootServices: status 0x8000000000000007".to_string(),
+            ),
+            (
+                ExitFailure::StaleTwice,
+                "ExitBootServices: the map key was stale twice".to_string(),
+            ),
+        ];
+        for (failure, reason) in cases {
+            assert_eq!(
+                exit_error_line(&failure).as_str(),
+                format!("{prefix}{reason}")
+            );
+        }
+        let longest = exit_error_line(&ExitFailure::MapTooLarge {
+            size: usize::MAX,
+            capacity: usize::MAX,
+        });
         assert!(longest.as_str().len() < Line::CAPACITY);
     }
 

@@ -7,7 +7,8 @@
 //! (system table) and section 12.4 (simple text output) in this file, and the
 //! sections named in the submodules for the rest.
 //!
-//! - `boot_services`: memory allocation and protocol lookup.
+//! - `boot_services`: memory allocation, protocol lookup, and reading the
+//!   memory map and ending boot services.
 //! - `file`: reading a whole file from the disk the boot stage came from.
 
 use core::ffi::c_void;

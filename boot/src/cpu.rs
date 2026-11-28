@@ -131,6 +131,16 @@ pub unsafe fn set_efer(value: u64) {
     }
 }
 
+/// Turns interrupts off (`CLI`, SDM volume 2A, "CLI—Clear Interrupt
+/// Flag"): once boot services have ended, the firmware's timer and its
+/// interrupt handlers are no longer valid.
+pub fn disable_interrupts() {
+    // SAFETY: `cli` clears only `RFLAGS.IF`, and is allowed in ring 0
+    // whatever the I/O privilege level. Not `nomem`: memory accesses that
+    // an interrupt handler could see must not move across it.
+    unsafe { asm!("cli", options(nostack)) }
+}
+
 /// Turns interrupts off, clears the direction flag, loads the stack pointer
 /// with `stack_top - 8` and jumps to `entry`. Never returns.
 ///
