@@ -1,5 +1,5 @@
-//! The boot services this stage calls: allocating memory and finding a
-//! protocol on a handle. UEFI specification 2.10, section 4.4 (the table),
+//! The boot services this stage calls: allocating memory and pages and
+//! finding a protocol on a handle. UEFI specification 2.10, section 4.4 (the table),
 //! section 7.2 (memory allocation) and section 7.3 (protocol handler
 //! services).
 
@@ -7,7 +7,7 @@ use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 use super::{Guid, Handle, SUCCESS, Status, SystemTable, TableHeader};
-use crate::report::{Failure, Step};
+use crate::report::{Failure, PlaceFailure, Step};
 
 /// "BOOTSERV" read as a little-endian number, the boot services table's
 /// signature (section 4.4).
@@ -16,6 +16,13 @@ const SIGNATURE: u64 = 0x5652_4553_544F_4F42;
 /// `EfiLoaderData` from `EFI_MEMORY_TYPE` (section 7.2, `AllocatePages()`): memory for the
 /// loaded program's data, which the firmware leaves alone afterwards.
 const LOADER_DATA: u32 = 2;
+
+/// `AllocateAnyPages` from `EFI_ALLOCATE_TYPE` (section 7.2,
+/// `AllocatePages()`): pages anywhere in memory.
+const ANY_PAGES: u32 = 0;
+
+/// The size of a page `AllocatePages()` hands out (section 7.2).
+const PAGE_SIZE: usize = 4096;
 
 /// `EFI_OPEN_PROTOCOL_GET_PROTOCOL` (section 7.3): only look the interface
 /// up. An interface opened this way need not be closed.
@@ -27,9 +34,21 @@ const GET_PROTOCOL: u32 = 0x0000_0002;
 #[repr(C)]
 pub(super) struct Table {
     header: TableHeader,
-    /// `RaiseTPL`, `RestoreTPL`, `AllocatePages`, `FreePages`,
-    /// `GetMemoryMap`.
-    _before_allocate_pool: [usize; 5],
+    /// `RaiseTPL`, `RestoreTPL`.
+    _before_allocate_pages: [usize; 2],
+    /// Section 7.2, `AllocatePages()`: the allocation type, the memory type,
+    /// the number of pages, and the physical address, read for
+    /// `AllocateAddress` and written with the first page's address.
+    allocate_pages: Option<
+        unsafe extern "efiapi" fn(
+            allocate_type: u32,
+            memory_type: u32,
+            pages: usize,
+            memory: *mut u64,
+        ) -> Status,
+    >,
+    /// `FreePages`, `GetMemoryMap`.
+    _before_allocate_pool: [usize; 2],
     /// Section 7.2, `AllocatePool()`.
     allocate_pool: Option<
         unsafe extern "efiapi" fn(pool_type: u32, size: usize, buffer: *mut *mut c_void) -> Status,
@@ -119,6 +138,44 @@ impl BootServices {
             return Err(Failure::Firmware(Step::Allocate, status));
         }
         NonNull::new(buffer.cast()).ok_or(Failure::NoInterface(Step::Allocate))
+    }
+
+    /// Allocates `pages` 4 KiB pages of loader data at any address, which
+    /// are never freed, for segment `segment` of the kernel, and clears
+    /// them. Returns their physical address and their memory.
+    ///
+    /// Loader data, like the file's buffer: the memory type only tells the
+    /// firmware the pages are this program's, and they stay the kernel's
+    /// after boot services end. Nothing runs from them under the firmware's
+    /// address tables, so loader code would add nothing.
+    pub fn allocate_pages(
+        &self,
+        pages: u64,
+        segment: usize,
+    ) -> Result<(u64, &'static mut [u8]), PlaceFailure> {
+        let no_pages = PlaceFailure::NoPages { segment };
+        let allocate_pages = self.table().allocate_pages.ok_or(no_pages)?;
+        let count = usize::try_from(pages).map_err(|_| no_pages)?;
+        let size = count.checked_mul(PAGE_SIZE).ok_or(no_pages)?;
+        let mut physical = 0;
+        // SAFETY: the function comes from the checked table, and `physical`
+        // is a valid place for the firmware to store the address (section
+        // 7.2).
+        let status = unsafe { allocate_pages(ANY_PAGES, LOADER_DATA, count, &mut physical) };
+        if status != SUCCESS {
+            return Err(PlaceFailure::Firmware { segment, status });
+        }
+        // Section 2.3.4, x64 platforms: memory is identity mapped while boot
+        // services run, so the physical address is also a pointer.
+        let start = NonNull::new(physical as *mut u8).ok_or(no_pages)?;
+        // SAFETY: the firmware has just given this program `size` bytes at
+        // `start`, which nothing else uses and which are never freed. They
+        // are cleared before the slice is made, so every byte is initialised.
+        let memory = unsafe {
+            ptr::write_bytes(start.as_ptr(), 0, size);
+            core::slice::from_raw_parts_mut(start.as_ptr(), size)
+        };
+        Ok((physical, memory))
     }
 
     /// Looks up the interface of protocol `guid` on `handle`.
