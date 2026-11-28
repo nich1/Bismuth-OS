@@ -604,22 +604,24 @@ fn check() -> Result<()> {
         cargo().args(["clippy", "--package", "xtask", "--", "-D", "warnings"]),
         "cargo clippy (xtask)",
     )?;
-    run_checked(
-        cargo().args(["test", "--package", "bismuth-elf"]),
-        "cargo test (elf)",
-    )?;
-    run_checked(
-        cargo().args([
-            "clippy",
-            "--package",
-            "bismuth-elf",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ]),
-        "cargo clippy (elf)",
-    )?;
+    for (package, name) in [("bismuth-elf", "elf"), ("bismuth-paging", "paging")] {
+        run_checked(
+            cargo().args(["test", "--package", package]),
+            &format!("cargo test ({name})"),
+        )?;
+        run_checked(
+            cargo().args([
+                "clippy",
+                "--package",
+                package,
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+            &format!("cargo clippy ({name})"),
+        )?;
+    }
     run_checked(
         cargo()
             .args([

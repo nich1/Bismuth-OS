@@ -19,6 +19,7 @@ something.
 | Kernel | `kernel/src/main.rs` | A separate program, built as an ELF file for the `x86_64-unknown-none` target. Its entry point only stops the processor. The boot stage reads and checks its file but does not load it yet | `cargo xtask check` reads its file |
 | Processor instructions | `kernel/src/cpu.rs` | The kernel's only `unsafe` code: the halt loop | Used by the kernel |
 | ELF reader | `elf/src/lib.rs` | Safe, allocation-free library that checks an ELF file and reports its entry point and loadable segments, or an error. The boot stage uses it on the kernel file | `cargo xtask check` runs its unit tests (`elf/src/tests.rs`) and runs it on the kernel file |
+| Address table builder | `paging/src/lib.rs` | Safe, allocation-free library that builds x86-64 4-level address tables (page tables): maps a range of virtual addresses to physical ones with 4 KiB pages and read, write and execute permissions, in memory the caller lends it. Nothing uses it yet; the boot stage will use it to put the kernel at its address | `cargo xtask check` runs its unit tests (`paging/src/tests.rs`) |
 
 ## The boot disk
 
@@ -40,7 +41,7 @@ none.
 |---|---|---|
 | Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands. `test` runs the boot scenarios. `check` also runs the ELF reader on the kernel file and checks its layout |
 | Code host commands | `xtask/src/host.rs` | `pr-open`, `pr-edit`, `pr-ready`, `pr-wait`, `issue-read`, `issue-comment` and `issue-new`, through `gh`. Checks every title and body with the rule in `tools/check-attribution.sh` before sending it |
-| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per file of the boot stage, kernel and ELF reader, and third-party packages, and compares the report with the stored one |
+| Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per file of the boot stage, kernel, ELF reader and address table builder, and third-party packages, and compares the report with the stored one |
 | Stored footprint | `snapshots/footprint.txt` | The expected footprint report. `cargo xtask snapshot --update` rewrites it |
 | Kernel build settings | `.cargo/config.toml` | Builds the kernel as a fixed-address executable at `0xFFFF_FFFF_8000_0000`, and defines the `cargo xtask` alias |
 | Pinned compiler | `rust-toolchain.toml` | The Rust version and the build targets for the boot stage (UEFI) and the kernel |
