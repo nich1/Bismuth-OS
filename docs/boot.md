@@ -34,8 +34,8 @@ The boot stage then does four things:
 3. **Reads the kernel file and checks it.** It reads
    `EFI\BISMUTH\KERNEL.ELF` from the disk it was started from, hands the bytes
    to the `elf` reader (described below) and writes one more line to the
-   serial port: either `BISMUTH KERNEL FILE OK entry=0x1280 segments=3
-   bytes=6152` (the numbers are an example), or a line starting
+   serial port: either `BISMUTH KERNEL FILE OK entry=0xffffffff80001190
+   segments=2 bytes=5280` (the numbers are an example), or a line starting
    `BISMUTH KERNEL FILE ERROR:` with the reason. The reasons are: file not
    found, file is empty, file is too large (the limit is 64 MiB), reading
    failed, or the name of the error the ELF reader returned.
@@ -90,10 +90,16 @@ processor it is for, and the *entry point*: the address where execution
 starts. The header points to a table of *segments*. Each segment is a piece of
 the file that must be placed at a given address in memory, with permissions:
 read, write, execute, or a mix. Loading an ELF file means copying each segment
-into place and then jumping to the entry point. The kernel as built can be
-placed at any address (it is *position-independent*) and has three loadable
-segments: one read-only, one read and execute (the code), and one read and
-write.
+into place and then jumping to the entry point.
+
+The kernel is built to run at one fixed address, in the top 2 GiB of the
+address range: its first byte goes at `0xFFFF_FFFF_8000_0000`. Its ELF file
+is a *fixed-address executable*, so loading it needs no fixing up of
+addresses. The settings that do this are in `.cargo/config.toml`. The kernel
+has one loadable segment per kind of permission: one read-only, one read and
+execute (the code), and one read and write once the kernel has data it
+changes (today it has none, so there are two). Each segment starts on a page
+of its own, so each can be given its own permissions.
 
 **The reader** is the `elf` library (`bismuth-elf`). Given the bytes of a
 file, it checks the header and the segment table and returns the entry point
@@ -118,6 +124,10 @@ Tests cover this in three ways:
    reader only ever returns an error or segments that lie inside the file.
 3. **`cargo xtask check` reads the real kernel file** and fails unless it finds
    at least one loadable segment and an entry point inside an executable one.
+   It also fails unless the file is a fixed-address executable, its entry
+   point and every segment lie at or above `0xFFFF_FFFF_8000_0000`, no two
+   segments share a 4 KiB page, and each segment sits at the same place in a
+   page in memory as in the file.
 
 ## How it is tested
 

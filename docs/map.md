@@ -38,10 +38,11 @@ none.
 
 | Part | Where | What it does |
 |---|---|---|
-| Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands. `test` runs the boot scenarios. `check` also runs the ELF reader on the kernel file |
+| Build runner | `xtask/src/main.rs` | `build`, `run`, `test`, `snapshot` and `check`, and dispatches the code host commands. `test` runs the boot scenarios. `check` also runs the ELF reader on the kernel file and checks its layout |
 | Code host commands | `xtask/src/host.rs` | `pr-open`, `pr-edit`, `pr-ready`, `pr-wait`, `issue-read`, `issue-comment` and `issue-new`, through `gh`. Checks every title and body with the rule in `tools/check-attribution.sh` before sending it |
 | Footprint snapshot | `xtask/src/footprint.rs` | Measures boot image size, `unsafe` counts per file of the boot stage, kernel and ELF reader, and third-party packages, and compares the report with the stored one |
 | Stored footprint | `snapshots/footprint.txt` | The expected footprint report. `cargo xtask snapshot --update` rewrites it |
+| Kernel build settings | `.cargo/config.toml` | Builds the kernel as a fixed-address executable at `0xFFFF_FFFF_8000_0000`, and defines the `cargo xtask` alias |
 | Pinned compiler | `rust-toolchain.toml` | The Rust version and the build targets for the boot stage (UEFI) and the kernel |
 | Boot checks | `.github/workflows/ci.yml` | Runs `cargo xtask check` on every pull request and on `main`, but not when only a title or description is edited |
 | Text checks | `.github/workflows/text.yml` | Runs the authorship, naming and workflow checks below on every pull request and on `main`, and again when a title or description is edited |
